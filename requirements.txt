@@ -1,0 +1,5 @@
+xlwings>=0.30.12
+pandas>=2.0.0
+xlrd==1.2.0
+xlutils>=2.0.0
+pyOpenSSL>=23.0.0
