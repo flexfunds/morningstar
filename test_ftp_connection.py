@@ -8,11 +8,11 @@ logger = logging.getLogger("ftplib")
 
 # FTP server configuration
 ftp_config = {
-    "host": "127.0.0.1",
+    "host": "omar.superhosting.bg",
     "port": 21,  # Default FTP port
-    "user": "nav_auto",
-    "password": "hola",
-    "directory": "/1"
+    "user": "data@etpcap2dac.com",
+    "password": "BF0*5bZIRZK^",
+    "directory": "/NAVs_Consolidated"
 }
 
 

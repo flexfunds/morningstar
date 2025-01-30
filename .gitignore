@@ -1,3 +1,10 @@
+# Environment variables
+.env
+
+# Google credentials
+*credentials*.json
+ftp-drive-sync-33b2ad1dce15.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -33,9 +40,6 @@ ENV/
 
 # Logs
 *.log
-
-# Environment variables
-.env
 
 # System Files
 .DS_Store
