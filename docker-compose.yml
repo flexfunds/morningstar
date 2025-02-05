@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  nav-processor:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      # Mount these directories so we can see the input/output files
+      - ./input:/app/input
+      - ./output:/app/output
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=8080

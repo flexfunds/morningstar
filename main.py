@@ -66,7 +66,7 @@ processor = NAVProcessor(
 
 # Process NAVs and send email
 processor.process_navs(
-    date_str="01242025",
+    date_str="01312025",
     send_email=True,
     to_emails=[os.getenv('REPORT_EMAIL_RECIPIENT')]
 )

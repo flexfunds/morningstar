@@ -302,10 +302,25 @@ class NAVProcessor:
                 f"Successfully processed NAV files and saved output to {output_path}")
 
             # After saving the output file
-            if send_email and self.email_sender and to_emails:
+            self.logger.info(
+                f"Email settings - send_email: {send_email}, to_emails: {to_emails}")
+            if send_email and self.email_sender:
+                self.logger.info("Starting email sending process...")
                 subject = f"FlexFunds Calculation Agent ETPs - Morningstar NAV Update"
                 body = f"""Hi team,\n\nI hope you are well.\n\nPlease find attached the updated NAV for the pricing distribution process of the different notes for which we function as the calculation agent.\n\nMany thanks,"""
 
+                # Ensure to_emails is a list
+                if isinstance(to_emails, str):
+                    to_emails = [to_emails]
+                    self.logger.info(
+                        f"Converted single email to list: {to_emails}")
+                elif not to_emails:
+                    self.logger.error("No email recipients provided")
+                    return False
+                else:
+                    self.logger.info(f"Using email list: {to_emails}")
+
+                self.logger.info("Attempting to send email...")
                 email_sent = self.email_sender.send_report(
                     to_emails=to_emails,
                     subject=subject,
@@ -317,6 +332,10 @@ class NAVProcessor:
                     self.logger.info("NAV report sent via email successfully")
                 else:
                     self.logger.error("Failed to send NAV report via email")
+                    return False
+            else:
+                self.logger.warning(
+                    "Email sending skipped - send_email is False or email_sender not configured")
 
             # Upload output to Drive if configured
             if self.drive_service and self.drive_config.get('output_folder_id'):

@@ -1,0 +1,63 @@
+{
+  "info": {
+    "name": "NAV Processor API",
+    "description": "API for processing NAV files and sending reports",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Process NAVs (Single Email)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "https://nav-processor-xxxxx-uc.a.run.app/process-navs",
+          "protocol": "https",
+          "host": ["nav-processor-xxxxx-uc", "a", "run", "app"],
+          "path": ["process-navs"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"date_str\": \"01242025\",\n    \"emails\": \"recipient@example.com\"\n}"
+        },
+        "description": "Process NAV files and send report to a single email"
+      }
+    },
+    {
+      "name": "Process NAVs (Multiple Emails)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "https://nav-processor-xxxxx-uc.a.run.app/process-navs",
+          "protocol": "https",
+          "host": ["nav-processor-xxxxx-uc", "a", "run", "app"],
+          "path": ["process-navs"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"date_str\": \"01242025\",\n    \"emails\": [\n        \"recipient1@example.com\",\n        \"recipient2@example.com\",\n        \"recipient3@example.com\"\n    ]\n}"
+        },
+        "description": "Process NAV files and send report to multiple emails"
+      }
+    }
+  ]
+} 
