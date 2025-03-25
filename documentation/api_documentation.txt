@@ -1,0 +1,148 @@
+NAV Processor API Documentation
+============================
+
+Authentication
+-------------
+All API endpoints require authentication using an API key.
+Header required: X-API-Key: [your-api-key]
+
+Endpoints
+--------
+
+1. NAV Data Endpoints
+-------------------
+
+GET /nav-data
+Description: Retrieve NAV data with filtering and pagination
+Parameters:
+- page (optional): Page number (default: 1)
+- per_page (optional): Items per page (default: 50)
+- isin (optional): Filter by ISIN
+- series_number (optional): Filter by series number
+- start_date (optional): Filter by start date (YYYY-MM-DD)
+- end_date (optional): Filter by end date (YYYY-MM-DD)
+
+POST /fetch-remote-navs
+Description: Fetch NAV data from remote sources
+Body:
+{
+    "date_str": "MMDDYYYY" (optional),
+    "isin_filter": "daily|weekly|monthly" (optional),
+    "isin": "specific-isin" (optional),
+    "series_number": "specific-series" (optional)
+}
+
+POST /generate-templates
+Description: Generate and distribute NAV report templates
+Body:
+{
+    "date_str": "MMDDYYYY" (optional),
+    "emails": ["email@example.com"],
+    "isin_filter": "daily|weekly|monthly" (optional),
+    "template_types": ["morningstar", "six"]
+}
+
+2. Series Management Endpoints
+---------------------------
+
+GET /series
+Description: Get series information with filtering and pagination
+Parameters:
+- page (optional): Page number (default: 1)
+- per_page (optional): Items per page (default: 50)
+- status (optional): Filter by status (A, D, Matured)
+- region (optional): Filter by region
+- isin (optional): Filter by ISIN
+- series_number (optional): Filter by series number
+
+GET /series/{identifier}/details
+Description: Get detailed information about a specific series
+Parameters:
+- identifier: ISIN or series number
+
+GET /series/{identifier}/nav-history
+Description: Get NAV history for a specific series
+Parameters:
+- identifier: ISIN or series number
+- start_date (optional): Filter by start date
+- end_date (optional): Filter by end date
+
+3. Stakeholder Management Endpoints
+--------------------------------
+
+GET /series/{identifier}/stakeholders
+Description: Get stakeholder information for a specific series
+Parameters:
+- identifier: ISIN or series number
+
+4. Fee Structure Endpoints
+------------------------
+
+GET /series/{identifier}/fee-structures
+Description: Get fee structures for a specific series
+Parameters:
+- identifier: ISIN or series number
+
+GET /fee-structures/summary
+Description: Get a summary of all fee structures
+Parameters:
+- page (optional): Page number (default: 1)
+- per_page (optional): Items per page (default: 50)
+- fee_type (optional): Filter by fee type
+- category (optional): Filter by category
+
+5. Series Qualitative Data Endpoints
+---------------------------------
+
+POST /series-qualitative/changes
+Description: Compare and detect changes in series qualitative data
+Body: Form data with file upload
+
+POST /series-qualitative/update
+Description: Update master series qualitative data file
+Body: Form data with file upload
+
+6. System Endpoints
+-----------------
+
+GET /health
+Description: Health check endpoint
+Response: {"status": "healthy"}
+
+GET /statistics
+Description: Get system-wide statistics
+Response: Contains series and NAV entry statistics
+
+Response Formats
+--------------
+All endpoints return JSON responses with the following structure:
+
+Success Response:
+{
+    "status": "success",
+    "data": {...},
+    "pagination": {...} (if applicable)
+}
+
+Error Response:
+{
+    "status": "error",
+    "message": "Error description",
+    "type": "ErrorType" (in debug mode),
+    "traceback": "..." (in debug mode)
+}
+
+Rate Limiting
+------------
+- Default timeout: 300 seconds (5 minutes)
+- Maximum file upload size: Determined by server configuration
+
+Error Handling
+-------------
+The API implements comprehensive error handling:
+- Invalid API key: 401 Unauthorized
+- Resource not found: 404 Not Found
+- Invalid request: 400 Bad Request
+- Server errors: 500 Internal Server Error
+
+All errors return detailed error messages to help troubleshoot issues. 

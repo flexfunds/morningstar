@@ -1,0 +1,4 @@
+ssh ubuntu@10.8.10.4
+http://flextrader-dev.flexfunds.com/panel/client/
+http://flextrader-dev.flexfunds.com:8888/db/manager/Users
+http://flextrader-dev.flexfunds.com:8025/#

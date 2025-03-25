@@ -5,11 +5,28 @@ services:
     ports:
       - "8080:8080"
     env_file:
-      - .env
+      - .env.production
     volumes:
-      # Mount these directories so we can see the input/output files
-      - ./input:/app/input
+      # Mount output directory for persistence
       - ./output:/app/output
+      # Mount persistent database volume
+      - nav-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=8080
+      - DATABASE_URL=sqlite:////app/data/nav_data.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nav-data:
+    # This creates a named volume that persists between container restarts

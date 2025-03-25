@@ -1,0 +1,181 @@
+NAV Processor Web Interface - User Guide
+===================================
+
+This guide provides detailed instructions for using the NAV Processor web interface.
+
+Navigation
+----------
+The application is organized into five main tabs:
+1. NAV Data
+2. Series Data
+3. Stakeholders
+4. Fee Structures
+5. Series Qualitative Data
+
+1. NAV Data Tab
+--------------
+Purpose: View and manage NAV data entries
+
+Features:
+a) Search and Filter
+   - ISIN search
+   - Series number search
+   - Date range selection
+   - Clear filters option
+
+b) Actions
+   - Fetch Remote NAVs
+     * Select date (optional)
+     * Choose filter type (daily/weekly/monthly)
+     * Specify ISIN or series number (optional)
+   
+   - Generate Templates
+     * Select distribution type (Morningstar/SIX)
+     * Choose custom email option
+     * Select template types
+     * Set date and filters
+
+c) Data Display
+   - Paginated table view
+   - Series information
+   - NAV values
+   - Dates
+   - Issuer information
+
+2. Series Data Tab
+----------------
+Purpose: Manage and view series information
+
+Features:
+a) Search and Filter
+   - ISIN search
+   - Series number search
+   - Status filter (Active/Discontinued/Matured)
+   - Region filter
+
+b) Series Details
+   - View comprehensive series information
+   - Status indicators with color coding
+   - Currency and NAV frequency
+   - Detailed view option for each series
+
+c) Series Details Modal
+   - Complete series information
+   - Stakeholder details
+   - Custodian information
+   - Fee structures
+
+3. Stakeholders Tab
+-----------------
+Purpose: View and manage stakeholder relationships
+
+Features:
+a) Search
+   - Search by ISIN or series number
+   - View all related stakeholders
+
+b) Information Display
+   - Primary stakeholders section
+   - Service providers section
+   - Custodians section
+   - Fee information
+
+4. Fee Structures Tab
+-------------------
+Purpose: Manage and view fee structures
+
+Features:
+a) Search and Filter
+   - ISIN search
+   - Series number search
+   - Fee category filter
+
+b) Fee Information Display
+   - Fee types
+   - Categories
+   - Values (percentage or fixed amount)
+   - AUM thresholds
+   - Currencies
+
+5. Series Qualitative Data Tab
+----------------------------
+Purpose: Manage series qualitative data updates
+
+Features:
+a) File Upload
+   - Upload new series data file
+   - Compare with master file
+
+b) Change Detection
+   - View new series additions
+   - View removed series
+   - View field updates
+   - Detailed change comparison
+
+c) Master File Update
+   - Update master file with changes
+   - Automatic backup creation
+   - Change confirmation
+
+Common Features
+-------------
+1. Pagination
+   - Navigate through multiple pages of data
+   - Items per page selection
+   - Page number indicators
+
+2. Data Export
+   - Generate reports
+   - Download templates
+   - Export data in various formats
+
+3. Error Handling
+   - Clear error messages
+   - User-friendly notifications
+   - Action confirmation dialogs
+
+Best Practices
+------------
+1. Regular Data Updates
+   - Fetch NAV data daily
+   - Review and verify changes
+   - Keep stakeholder information current
+
+2. Template Generation
+   - Verify recipient email addresses
+   - Choose appropriate template types
+   - Review generated templates
+
+3. Data Management
+   - Regular backup of master files
+   - Verify changes before updates
+   - Maintain accurate stakeholder information
+
+4. Security
+   - Keep API keys secure
+   - Log out after sessions
+   - Regular password updates
+
+Troubleshooting
+-------------
+1. NAV Data Issues
+   - Verify date formats
+   - Check ISIN/series number accuracy
+   - Confirm remote source availability
+
+2. Template Generation Issues
+   - Verify email configurations
+   - Check file permissions
+   - Confirm template type selection
+
+3. Series Updates
+   - Verify file format
+   - Check for required fields
+   - Confirm change detection accuracy
+
+Support
+-------
+For technical support or questions:
+- Contact system administrator
+- Review error logs
+- Check documentation updates 

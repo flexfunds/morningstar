@@ -1,0 +1,64 @@
+NAV Processor Web Application - Overview
+=====================================
+
+The NAV Processor Web Application is a comprehensive system designed to manage and process Net Asset Value (NAV) data for financial series. This application provides a modern web interface for handling various aspects of NAV data management, series information, stakeholder details, and fee structures.
+
+Key Features
+-----------
+1. NAV Data Management
+   - Fetch and store NAV data from remote sources
+   - View historical NAV data with filtering capabilities
+   - Generate and distribute NAV reports in various formats
+
+2. Series Management
+   - Comprehensive series information tracking
+   - Status monitoring (Active, Discontinued, Matured)
+   - Detailed series metadata management
+
+3. Stakeholder Management
+   - Track key stakeholders for each series
+   - Manage service providers and custodians
+   - Monitor relationships between different parties
+
+4. Fee Structure Management
+   - Track different types of fee structures
+   - Monitor AUM-based and fixed fees
+   - Manage fee currencies and thresholds
+
+5. Series Qualitative Data Management
+   - Upload and compare series data files
+   - Detect changes in series information
+   - Update master data files with change tracking
+
+Technical Overview
+----------------
+- Built with Flask (Python web framework)
+- RESTful API architecture
+- Secure API key authentication
+- Modern frontend using Vue.js
+- Bootstrap for responsive design
+- Real-time data processing capabilities
+
+Target Users
+-----------
+1. Fund Managers
+2. Operations Teams
+3. Compliance Officers
+4. Data Management Teams
+5. Financial Analysts
+
+Security Features
+---------------
+- API Key authentication required for all endpoints
+- Secure file handling
+- Input validation and sanitization
+- Error handling and logging
+
+Integration Capabilities
+----------------------
+- FTP integration for NAV data retrieval
+- Email distribution system
+- Google Drive integration for file storage
+- Database integration for persistent storage
+
+This application serves as a central hub for managing all aspects of NAV processing and series management, providing a robust platform for financial operations teams. 

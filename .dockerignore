@@ -12,3 +12,6 @@ venv/
 *.md
 test* 
 .yaml
+# Keep database and templates
+!initial-data/
+!input/template/
