@@ -1,11 +1,12 @@
 # Environment variables
 .env
 .env.production
+.env.*
 build-vars.yaml
 
 # Google credentials
 *credentials*.json
-ftp-drive-sync-33b2ad1dce15.json
+ftp-drive-sync-*.json
 
 # Python
 __pycache__/
@@ -57,7 +58,6 @@ temp/
 *.json
 !package.json
 !package-lock.json
-ftp-drive-sync-*.json
 *.pem
 *.key
 *.crt
@@ -93,3 +93,7 @@ Thumbs.db
 # Docker
 .docker/
 docker-compose.override.yml
+
+# Test files
+test_*.py
+verify_*.py
