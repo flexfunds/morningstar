@@ -8,7 +8,7 @@ WORKDIR /app
 RUN useradd -m -u 1000 appuser
 
 # Copy requirements first to leverage Docker cache
-COPY requirements.docker.txt .
+COPY requirements.docker.txt ./
 
 # Install dependencies (excluding Windows-specific packages)
 RUN pip install --no-cache-dir -r requirements.docker.txt
@@ -17,12 +17,7 @@ RUN pip install --no-cache-dir -r requirements.docker.txt
 RUN mkdir -p /app/input/template /app/output /app/data
 
 # Copy template files
-COPY input/template/Series\ Qualitative\ Data.xlsx /app/input/template/
-COPY input/template/NAVs\ Historical\ Prices\ 03.21.2025.xlsx /app/input/template/
-COPY input/template/LAM_SFI_Price\ -SIX\ Financial\ Template.xlsx /app/input/template/
-COPY input/template/nav_seed_data.csv /app/input/template/
-COPY input/template/Exclude\ ISINs.csv /app/input/template/
-COPY input/template/Morningstar\ Performance\ Template.xls /app/input/template/
+COPY input/template/*.xlsx input/template/*.csv input/template/*.xls /app/input/template/
 
 # Copy Google Drive credentials
 COPY ftp-drive-sync-33b2ad1dce15.json /app/
