@@ -16,8 +16,19 @@ RUN pip install --no-cache-dir -r requirements.docker.txt
 # Create necessary directories
 RUN mkdir -p /app/input/template /app/output /app/data
 
+# Create temp directory for nav processor
+RUN mkdir -p /tmp/nav_processor && \
+    chown appuser:appuser /tmp/nav_processor && \
+    chmod 777 /tmp/nav_processor
+
+# Debug: Show what's in the local template directory
+RUN echo "Contents of local directory before copy:" && ls -la input/template || true
+
 # Copy template files
-COPY input/template/*.xlsx input/template/*.csv input/template/*.xls /app/input/template/
+COPY input/template/ /app/input/template/
+
+# Debug: Show what was copied
+RUN echo "Contents after copy:" && ls -la /app/input/template/
 
 # Copy Google Drive credentials
 COPY ftp-drive-sync-33b2ad1dce15.json /app/

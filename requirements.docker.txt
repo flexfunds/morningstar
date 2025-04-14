@@ -60,6 +60,7 @@ requests-oauthlib==2.0.0
 rich==13.9.4
 rsa==4.9
 six==1.17.0
+sqlalchemy==2.0.28
 stack-data==0.6.3
 tornado==6.4.2
 traitlets==5.14.3
