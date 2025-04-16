@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Exit on any error
+set -e
+
 # Create necessary directories if they don't exist
 mkdir -p output data
 
@@ -21,10 +24,10 @@ for template in "${required_templates[@]}"; do
     fi
 done
 
-# Copy initial database if it doesn't exist
-if [ ! -f "data/nav_data.db" ]; then
-    echo "Copying initial database..."
-    cp initial-data/nav_data.db data/nav_data.db
+# Verify database file exists
+if [ ! -f "nav_data.db" ]; then
+    echo "ERROR: Database file nav_data.db is missing! Please place it in the root directory."
+    exit 1
 fi
 
 # Verify Google Drive credentials
@@ -39,11 +42,27 @@ docker-compose up --build -d
 
 # Wait for the container to be healthy
 echo "Waiting for service to be healthy..."
-sleep 10
+max_attempts=30
+attempt=1
+while [ $attempt -le $max_attempts ]; do
+    if curl -s http://localhost:9080/health > /dev/null; then
+        echo "Service is healthy!"
+        break
+    fi
+    echo "Attempt $attempt: Waiting for service to be healthy..."
+    sleep 5
+    attempt=$((attempt + 1))
+done
+
+if [ $attempt -gt $max_attempts ]; then
+    echo "ERROR: Service did not become healthy within the expected time"
+    docker-compose logs
+    exit 1
+fi
 
 # Check if the service is running
 if docker-compose ps | grep -q "nav-processor.*Up"; then
-    echo "Deployment successful! The service is running on port 8080"
+    echo "Deployment successful! The service is running on port 9080"
     
     # Get container ID
     container_id=$(docker-compose ps -q nav-processor)

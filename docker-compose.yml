@@ -9,8 +9,8 @@ services:
     volumes:
       # Mount output directory for persistence
       - ./output:/app/output
-      # Mount persistent database volume
-      - nav-data:/app/data
+      # Mount database file directly
+      - ./nav_data.db:/app/data/nav_data.db
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=9080
@@ -26,7 +26,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  nav-data:
-    # This creates a named volume that persists between container restarts
