@@ -390,12 +390,11 @@ class DatabaseService:
     def import_historic_data(self, excel_path: str) -> Dict[str, ImportResult]:
         """
         Import historic NAV data from Excel file with multiple sheets (Weekly, Monthly, Daily)
-        All sheets follow the same structure:
-        - Headers start at E5 (Date header)
-        - F5 and beyond contain ISIN numbers
-        - Data starts from row 6
-        - Daily sheet has only one ISIN (in column F)
-        - Weekly and Monthly sheets have multiple ISINs (columns F onwards)
+        Sheet structure:
+        - Row 6: Contains ISIN numbers starting from column E
+        - Row 7 onwards: Contains dates in column E and NAV values in corresponding ISIN columns
+        - First relevant data column is E (dates)
+        - NAV values start from column F onwards
 
         Args:
             excel_path: Path to the Excel file
@@ -407,7 +406,6 @@ class DatabaseService:
         sheet_configs = {
             'Weekly': {'type': 'weekly', 'usecols': 'E:BY'},
             'Monthly': {'type': 'monthly', 'usecols': 'E:EU'},
-            # Daily only needs two columns
             'Daily': {'type': 'daily', 'usecols': 'E:F'}
         }
 
@@ -418,56 +416,58 @@ class DatabaseService:
                     distribution_type = config['type']
                     usecols = config['usecols']
 
-                    # Read the header row (row 5) to get the column names
-                    header_df = pd.read_excel(
+                    # First, read the ISINs from row 6
+                    isins_df = pd.read_excel(
                         excel_path,
                         sheet_name=sheet_name,
-                        nrows=1,  # Read only the header row
-                        skiprows=4,  # Skip to row 5 (0-based index 4)
+                        header=None,
+                        nrows=1,
+                        skiprows=5,  # Skip to row 6 (0-based index 5)
                         usecols=usecols
                     )
 
-                    # Read the actual data starting from row 7
+                    # Get ISINs (skip the first column which is 'Dates')
+                    isins = isins_df.iloc[0, 1:].values
+
+                    # Now read the actual data starting from row 7
                     df = pd.read_excel(
                         excel_path,
                         sheet_name=sheet_name,
-                        skiprows=6,  # Skip to row 7 (0-based index 6)
-                        usecols=usecols,
-                        na_values=['', 'NA', 'N/A']
+                        header=None,
+                        skiprows=6,  # Skip to row 7
+                        usecols=usecols
                     )
 
-                    # Get the column names from the header
-                    # First column is always date
-                    date_col = header_df.columns[0]
-                    # Remaining columns are ISINs
-                    isin_cols = header_df.columns[1:]
+                    # Rename columns
+                    df.columns = ['Valuation Period-End Date'] + list(isins)
 
-                    # Rename the columns
-                    df.columns = [date_col] + list(isin_cols)
+                    print(f"Debug - First few rows of raw data:")
+                    print(df.head())
 
                     if sheet_name == 'Daily':
-                        # For Daily, we already have the format we want (date and one ISIN)
-                        # Just need to rename and add ISIN column
-                        isin = isin_cols[0]  # Get the single ISIN
-                        df = df.rename(columns={
-                            date_col: 'Valuation Period-End Date',
-                            isin: 'NAV'
-                        })
+                        # For Daily, we only have one ISIN column
+                        isin = isins[0]
+                        df = df.rename(columns={isin: 'NAV'})
                         df['ISIN'] = isin
                     else:
                         # For Weekly and Monthly, melt the multiple ISIN columns
                         df = df.melt(
-                            id_vars=[date_col],
+                            id_vars=['Valuation Period-End Date'],
                             var_name='ISIN',
                             value_name='NAV'
                         )
-                        df = df.rename(
-                            columns={date_col: 'Valuation Period-End Date'})
 
                     # Clean up the data
                     df = df.dropna(subset=['NAV'])
                     df['Valuation Period-End Date'] = pd.to_datetime(
                         df['Valuation Period-End Date'])
+
+                    print(f"\nDebug - Processed data for {sheet_name}:")
+                    print(f"Total rows: {len(df)}")
+                    print(
+                        f"Date range: {df['Valuation Period-End Date'].min()} to {df['Valuation Period-End Date'].max()}")
+                    print("Sample of processed data:")
+                    print(df.head())
 
                     # Use save_nav_entries to handle the import with the specific distribution type
                     results[sheet_name] = self.save_nav_entries(
@@ -475,6 +475,7 @@ class DatabaseService:
 
                 except Exception as e:
                     print(f"Error processing sheet {sheet_name}: {str(e)}")
+                    print(f"Full error details:", e)
                     results[sheet_name] = ImportResult(
                         added_count=0, duplicates_count=0, invalid_series_count=0)
 

@@ -276,6 +276,10 @@ class NAVProcessor:
 
                     # Apply filters
                     if not df.empty:
+                        # Convert frequency to uppercase for case-insensitive matching
+                        if 'Frequency' in df.columns:
+                            df['Frequency'] = df['Frequency'].str.upper()
+
                         if target_isins:
                             df = df[df['ISIN'].isin(target_isins)]
                         if exclude_isins:
@@ -744,8 +748,11 @@ Many thanks,""")
             Set[str]: Set of ISINs with the specified frequency
         """
         with self.db_service.SessionMaker() as session:
+            # Convert frequency to uppercase for case-insensitive matching
+            frequency = frequency.upper()
             isins = session.query(Series.isin).filter(
-                Series.nav_frequency == frequency,
+                # Use ilike for case-insensitive matching
+                Series.nav_frequency.ilike(frequency),
                 Series.status == 'ACTIVE'  # Only get active series
             ).all()
             return {isin[0] for isin in isins}
@@ -758,13 +765,19 @@ Many thanks,""")
             excel_path (str): Path to the Excel file containing historic NAV data
         """
         try:
-            added_count, duplicates_count = self.db_service.import_historic_data(
-                excel_path)
+            results = self.db_service.import_historic_data(excel_path)
+
+            # Calculate total counts across all sheets
+            total_added = sum(
+                result.added_count for result in results.values())
+            total_duplicates = sum(
+                result.duplicates_count for result in results.values())
+
             self.logger.info(
-                f"Successfully imported historic NAV data: {added_count} new entries added, "
-                f"{duplicates_count} duplicates skipped"
+                f"Successfully imported historic NAV data: {total_added} new entries added, "
+                f"{total_duplicates} duplicates skipped"
             )
-            return added_count, duplicates_count
+            return total_added, total_duplicates
         except Exception as e:
             self.logger.error(f"Error importing historic NAV data: {str(e)}")
             raise
