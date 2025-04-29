@@ -192,6 +192,32 @@ class NAVProcessor:
             df = self._read_csv_remote(filename, emitter, temp_file)
 
             if df is not None:
+                # Clean up the DataFrame
+                # Remove unnamed columns
+                unnamed_cols = [col for col in df.columns if 'Unnamed' in col]
+                if unnamed_cols:
+                    df = df.drop(columns=unnamed_cols)
+
+                # Clean up column names
+                df.columns = df.columns.str.strip()
+
+                # Convert date column to datetime
+                if 'Valuation Period-End Date' in df.columns:
+                    df['Valuation Period-End Date'] = pd.to_datetime(
+                        df['Valuation Period-End Date'])
+
+                # Clean up ISIN values
+                if 'ISIN' in df.columns:
+                    df['ISIN'] = df['ISIN'].str.strip()
+
+                # Clean up NAV values
+                if 'NAV' in df.columns:
+                    df['NAV'] = pd.to_numeric(df['NAV'], errors='coerce')
+
+                # Remove rows with missing required values
+                required_cols = ['ISIN', 'Valuation Period-End Date', 'NAV']
+                df = df.dropna(subset=required_cols)
+
                 # Save to input directory
                 input_path = self.input_dir / emitter / filename
                 input_path.parent.mkdir(exist_ok=True)
@@ -200,7 +226,14 @@ class NAVProcessor:
                 if self.drive_service:
                     # Add to upload queue
                     self.upload_queue.put((emitter, filename))
-            return df if df is not None else None
+
+                self.logger.debug(f"Processed {emitter} file: {filename}")
+                self.logger.debug(f"DataFrame shape: {df.shape}")
+                self.logger.debug(f"Unique ISINs: {df['ISIN'].unique()}")
+                self.logger.debug(
+                    f"Date range: {df['Valuation Period-End Date'].min()} to {df['Valuation Period-End Date'].max()}")
+
+                return df if not df.empty else None
         except Exception as e:
             if "550" not in str(e):  # Only log non-404 errors
                 self.logger.error(
@@ -276,16 +309,29 @@ class NAVProcessor:
 
                     # Apply filters
                     if not df.empty:
+                        self.logger.debug(
+                            f"Processing {emitter} file: {filename}")
+                        self.logger.debug(f"Initial row count: {len(df)}")
+
                         # Convert frequency to uppercase for case-insensitive matching
                         if 'Frequency' in df.columns:
                             df['Frequency'] = df['Frequency'].str.upper()
+                            self.logger.debug(
+                                f"Unique frequencies: {df['Frequency'].unique()}")
 
                         if target_isins:
                             df = df[df['ISIN'].isin(target_isins)]
+                            self.logger.debug(
+                                f"After ISIN filter: {len(df)} rows")
                         if exclude_isins:
                             df = df[~df['ISIN'].isin(exclude_isins)]
+                            self.logger.debug(
+                                f"After exclude ISIN filter: {len(df)} rows")
+
                         if not df.empty:
                             nav_dfs.append((emitter, df))
+                            self.logger.debug(
+                                f"Added {len(df)} rows from {emitter} to nav_dfs")
                         else:
                             self.logger.info(
                                 f"No matching ISINs found in {filename}")
@@ -383,11 +429,20 @@ Many thanks,""")
 
         for emitter, df in nav_dfs:
             if not df.empty:
+                self.logger.debug(f"Saving {emitter} data to database")
+                self.logger.debug(f"DataFrame shape: {df.shape}")
+                self.logger.debug(f"Unique ISINs: {df['ISIN'].unique()}")
+                self.logger.debug(
+                    f"Unique frequencies: {df['Frequency'].unique()}")
+
                 added, duplicates, invalids = self.db_service.save_nav_entries(
                     df, distribution_type, emitter)
                 total_added += added
                 total_duplicates += duplicates
                 total_invalids += invalids
+
+                self.logger.debug(
+                    f"{emitter} results - Added: {added}, Duplicates: {duplicates}, Invalids: {invalids}")
 
         # Only log the final summary
         self.logger.info(
