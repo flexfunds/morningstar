@@ -733,6 +733,17 @@ Many thanks,""")
                 if template_col in col_indices:
                     col_idx = col_indices[template_col]
                     value = row[nav_col]
+
+                    # Special handling for dates - convert to string format
+                    if template_col == 'NAV/Daily dividend Date':
+                        if isinstance(value, pd.Timestamp):
+                            value = value.strftime('%m/%d/%Y')
+                        else:
+                            try:
+                                date_obj = pd.to_datetime(value)
+                                value = date_obj.strftime('%m/%d/%Y')
+                            except:
+                                pass
                     sheet_output.write(row_idx, col_idx, value)
 
         # Save updated template
