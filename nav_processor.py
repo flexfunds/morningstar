@@ -353,13 +353,14 @@ class NAVProcessor:
         """Get email template based on distribution type."""
         if distribution_type.lower() == 'six':
             # Count series by emitter
-            emitter_counts = {}
+            emitter_isins = {}  # Dictionary to store sets of ISINs per emitter
             for emitter, df in nav_dfs:
-                # Count unique ISINs for each emitter
-                unique_isins = df['ISIN'].unique()
-                emitter_counts[emitter] = len(unique_isins)
+                if emitter not in emitter_isins:
+                    emitter_isins[emitter] = set()
+                # Add ISINs to the set for this emitter
+                emitter_isins[emitter].update(df['ISIN'].unique())
                 self.logger.debug(
-                    f"Found {len(unique_isins)} unique ISINs for {emitter}")
+                    f"Found {len(emitter_isins[emitter])} total unique ISINs for {emitter}")
 
             # Build the body with emitter counts
             body_lines = [
@@ -373,11 +374,15 @@ class NAVProcessor:
 
             # Add emitter counts in specific order
             emitters_order = ['IACAP', 'ETPCAP2', 'HFMX', 'CIX', 'DCXPD']
+            total_series = 0
             for emitter in emitters_order:
-                count = emitter_counts.get(emitter, 0)
+                count = len(emitter_isins.get(emitter, set()))
+                total_series += count
                 body_lines.append(f"{emitter}: {count}")
 
             body_lines.extend([
+                "",  # Empty line
+                f"Total series: {total_series}",
                 "",  # Empty line
                 "Many thanks,"
             ])
@@ -506,19 +511,25 @@ Many thanks,""")
                 nav_df = pd.concat(
                     [df for _, df in nav_dfs], ignore_index=True)
                 self.logger.info(f"Processing {len(nav_df)} NAV entries")
+                self.logger.info(
+                    f"Unique ISINs in input data: {len(nav_df['ISIN'].unique())}")
 
-                # Convert nav_date to datetime
-                nav_date = pd.to_datetime(date_str, format='%m%d%Y')
+                # Get the most recent date from the input files
+                nav_date = nav_df['Valuation Period-End Date'].max()
                 formatted_date = nav_date.strftime('%Y.%m.%d')
 
                 # Get series information from database
                 with self.db_service.SessionMaker() as session:
                     # Get all unique ISINs from the NAV data
                     isins = nav_df['ISIN'].unique()
+                    self.logger.info(
+                        f"Querying database for {len(isins)} ISINs")
 
                     # Query series information for these ISINs
                     series_info = session.query(Series).filter(
                         Series.isin.in_(isins)).all()
+                    self.logger.info(
+                        f"Found {len(series_info)} matching series in database")
 
                     # Create a dictionary for quick lookup
                     series_dict = {s.isin: s for s in series_info}
@@ -540,7 +551,8 @@ Many thanks,""")
                         # 2. ISIN
                         sheet.cell(row=current_row, column=2, value=str(isin))
                         # 3. Valuation Date
-                        sheet.cell(row=current_row, column=3, value=nav_date)
+                        sheet.cell(row=current_row, column=3,
+                                   value=row['Valuation Period-End Date'])
                         # 4. Currency
                         sheet.cell(row=current_row, column=4, value=str(
                             series.currency) if series.currency else "USD")
