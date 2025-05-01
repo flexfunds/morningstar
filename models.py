@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Date, DateTime, Integer, ForeignKey, Enum, UniqueConstraint
+from sqlalchemy import create_engine, Column, String, Float, Date, DateTime, Integer, ForeignKey, Enum, UniqueConstraint, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -114,6 +114,34 @@ class NAVEntry(Base):
 
     def __repr__(self):
         return f"<NAVEntry(isin='{self.isin}', series_number='{self.series_number}', date='{self.nav_date}', value={self.nav_value})>"
+
+
+class Trade(Base):
+    """Model for storing trade data from BNY files"""
+    __tablename__ = 'trades'
+
+    id = Column(Integer, primary_key=True)
+    series_number = Column(String(50), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    trade_type = Column(String(50))  # Buy/Sell
+    security_type = Column(String(50))  # Equity, Fixed Income, etc.
+    security_name = Column(String(255))
+    security_id = Column(String(100))  # ISIN, CUSIP, etc.
+    quantity = Column(Float)
+    price = Column(Float)
+    currency = Column(String(10))
+    settlement_date = Column(Date)
+    trade_value = Column(Float)
+    broker = Column(String(100))
+    account = Column(String(100))
+    source_file = Column(String(255))  # Original file name
+    source_folder = Column(String(255))  # ETPCAP2 or HFMX
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False,
+                        default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<Trade(series_number='{self.series_number}', trade_date='{self.trade_date}', security_name='{self.security_name}')>"
 
 
 def init_db(connection_string='sqlite:///nav_data.db'):

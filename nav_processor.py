@@ -212,11 +212,8 @@ class NAVProcessor:
 
                 # Clean up NAV values
                 if 'NAV' in df.columns:
-                    df['NAV'] = pd.to_numeric(df['NAV'], errors='coerce')
-
-                # Remove rows with missing required values
-                required_cols = ['ISIN', 'Valuation Period-End Date', 'NAV']
-                df = df.dropna(subset=required_cols)
+                    df['NAV'] = pd.to_numeric(df['NAV'].astype(
+                        str).str.replace(',', ''), errors='coerce')
 
                 # Save to input directory
                 input_path = self.input_dir / emitter / filename
@@ -307,34 +304,22 @@ class NAVProcessor:
                         missing_files.append(filename)
                         continue
 
-                    # Apply filters
+                    # Convert columns to appropriate types
+                    df['Frequency'] = df['Frequency'].astype(str).str.upper()
+                    df['ISIN'] = df['ISIN'].astype(str).str.strip()
+                    df['NAV'] = pd.to_numeric(df['NAV'].astype(
+                        str).str.replace(',', ''), errors='coerce')
+                    df['Valuation Period-End Date'] = pd.to_datetime(
+                        df['Valuation Period-End Date'])
+
+                    # Apply ISIN filters
+                    if target_isins:
+                        df = df[df['ISIN'].isin(target_isins)]
+                    if exclude_isins:
+                        df = df[~df['ISIN'].isin(exclude_isins)]
+
                     if not df.empty:
-                        self.logger.debug(
-                            f"Processing {emitter} file: {filename}")
-                        self.logger.debug(f"Initial row count: {len(df)}")
-
-                        # Convert frequency to uppercase for case-insensitive matching
-                        if 'Frequency' in df.columns:
-                            df['Frequency'] = df['Frequency'].str.upper()
-                            self.logger.debug(
-                                f"Unique frequencies: {df['Frequency'].unique()}")
-
-                        if target_isins:
-                            df = df[df['ISIN'].isin(target_isins)]
-                            self.logger.debug(
-                                f"After ISIN filter: {len(df)} rows")
-                        if exclude_isins:
-                            df = df[~df['ISIN'].isin(exclude_isins)]
-                            self.logger.debug(
-                                f"After exclude ISIN filter: {len(df)} rows")
-
-                        if not df.empty:
-                            nav_dfs.append((emitter, df))
-                            self.logger.debug(
-                                f"Added {len(df)} rows from {emitter} to nav_dfs")
-                        else:
-                            self.logger.info(
-                                f"No matching ISINs found in {filename}")
+                        nav_dfs.append((emitter, df))
 
                 except Exception as e:
                     self.logger.error(f"Error processing {filename}: {str(e)}")
@@ -342,7 +327,7 @@ class NAVProcessor:
         # Stop upload worker and wait for remaining uploads
         if upload_thread:
             self.upload_queue.put(("STOP", None))
-            self.upload_queue.join()  # Wait for all uploads to complete
+            self.upload_queue.join()
 
         if missing_files:
             self.logger.warning(f"Some files were not found: {missing_files}")

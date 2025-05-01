@@ -4,11 +4,14 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from functools import wraps
-from models import Series, SeriesStatus, FeeStructure
+from models import Series, SeriesStatus, FeeStructure, Trade
 from series_change_detector import SeriesChangeDetector
 import pandas as pd
 import math
 import traceback
+from sqlalchemy import func
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple, Set, Optional
 
 app = Flask(__name__)
 
@@ -30,6 +33,23 @@ def get_previous_business_day():
             break
 
     return prev_business_day.strftime('%m%d%Y')
+
+
+def get_nav_files(date_str):
+    """Get all NAV files for a given date"""
+    nav_files = []
+
+    # Check each source directory
+    for source in ['HFMX', 'IACAP', 'ETPCAP2', 'CIX', 'DCXPD']:
+        source_dir = os.path.join('input', source)
+        if os.path.exists(source_dir):
+            # Get all CSV files in the directory
+            for file in os.listdir(source_dir):
+                if file.endswith('.csv'):
+                    file_path = os.path.join(source_dir, file)
+                    nav_files.append(file_path)
+
+    return nav_files
 
 
 # Initialize configurations
@@ -291,7 +311,6 @@ def generate_templates():
                 'REPORT_EMAIL_RECIPIENT').split(',')]
 
         # Get filters
-        # Changed to accept array of filters
         isin_filters = data.get('isin_filters', [])
         specific_isins = data.get('isins', [])
         series_number = data.get('series_number')
@@ -1112,6 +1131,10 @@ def index():
                     <a class="nav-link" :class="{ active: activeTab === 'series-qualitative' }" 
                        href="#" @click.prevent="activeTab = 'series-qualitative'">Series Qualitative Data</a>
                 </li>
+                <li class="nav-item">
+                    <a class="nav-link" :class="{ active: activeTab === 'trades' }" 
+                       href="#" @click.prevent="activeTab = 'trades'">Trades</a>
+                </li>
             </ul>
 
             <!-- NAV Data Tab -->
@@ -1683,66 +1706,206 @@ def index():
                 </div>
             </div>
 
-            <!-- Fetch NAV Modal -->
-            <div v-if="showFetchNav" class="modal-mask">
-                <div class="modal-container">
-                    <div class="modal-header">
-                        <h4 class="mb-0">Fetch Remote NAVs</h4>
+            <!-- Trades Tab -->
+            <div v-if="activeTab === 'trades'">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0">Search Trades</h5>
                     </div>
-                    <div class="modal-body">
-                        <div v-if="loadingStates.fetchNav" class="text-center mb-4">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">Loading...</span>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="search-group">
+                                    <label>Series Number</label>
+                                    <input type="text" v-model="tradeFilters.series_number" 
+                                           class="form-control" placeholder="Enter Series Number">
+                                </div>
                             </div>
-                            <div class="mt-2">{{ progressMessages.fetchNav }}</div>
+                            <div class="col-md-3">
+                                <div class="search-group">
+                                    <label>Start Date</label>
+                                    <input type="date" v-model="tradeFilters.startDate" class="form-control">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="search-group">
+                                    <label>End Date</label>
+                                    <input type="date" v-model="tradeFilters.endDate" class="form-control">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="search-group">
+                                    <label>Security Type</label>
+                                    <input type="text" v-model="tradeFilters.security_type" 
+                                           class="form-control" placeholder="Enter Security Type">
+                                </div>
+                            </div>
                         </div>
-                        <div v-else>
-                            <div class="form-group mb-3">
-                                <label>Date</label>
-                                <input type="date" v-model="fetchNavForm.date_str" class="form-control" required>
+                        <div class="row mt-3">
+                            <div class="col-12">
+                                <button @click="loadTradeData" class="btn btn-primary">Search</button>
+                                <button @click="clearTradeFilters" class="btn btn-secondary ms-2">Clear Filters</button>
                             </div>
-                            <div class="form-group mb-3">
-                                <label>Filter Types</label>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="fetchNavForm.isin_filters" value="daily" class="form-check-input" id="dailyFilter">
-                                    <label class="form-check-label" for="dailyFilter">Daily</label>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="fetchNavForm.isin_filters" value="weekly" class="form-check-input" id="weeklyFilter">
-                                    <label class="form-check-label" for="weeklyFilter">Weekly</label>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="fetchNavForm.isin_filters" value="monthly" class="form-check-input" id="monthlyFilter">
-                                    <label class="form-check-label" for="monthlyFilter">Monthly</label>
-                                </div>
-                            </div>
-                            <div class="form-group mb-3">
-                                <label>ISINs</label>
-                                <div class="input-group mb-2">
-                                    <input type="text" v-model="newIsin" class="form-control" placeholder="Enter ISIN">
-                                    <button class="btn btn-outline-secondary" type="button" @click="addIsin('fetchNav')">Add</button>
-                                </div>
-                                <div class="isin-list">
-                                    <div v-for="(isin, index) in fetchNavForm.isins" class="badge bg-primary me-2 mb-2">
-                                        {{ isin }}
-                                        <button class="btn-close btn-close-white ms-1" @click="removeIsin('fetchNav', index)"></button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Trade Summary -->
+                <div class="card mb-4" v-if="tradeSummary">
+                    <div class="card-header">
+                        <h5 class="mb-0">Trade Summary</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="card bg-light">
+                                    <div class="card-body text-center">
+                                        <h6 class="card-title">Total Trades</h6>
+                                        <h3 class="mb-0">{{ tradeSummary.total_trades }}</h3>
                                     </div>
                                 </div>
                             </div>
-                            <div class="form-group mb-0">
-                                <label>Series Number</label>
-                                <input type="text" v-model="fetchNavForm.series_number" class="form-control" placeholder="Enter specific series number">
+                            <div class="col-md-3">
+                                <div class="card bg-light">
+                                    <div class="card-body text-center">
+                                        <h6 class="card-title">Date Range</h6>
+                                        <p class="mb-0">
+                                            {{ tradeSummary.date_range.earliest }} to {{ tradeSummary.date_range.latest }}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card bg-light">
+                                    <div class="card-body">
+                                        <h6 class="card-title">Trades by Source</h6>
+                                        <div class="row">
+                                            <div class="col-6" v-for="folder in tradeSummary.trades_by_folder">
+                                                <p class="mb-1">
+                                                    {{ folder.folder }}: {{ folder.count }} trades
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <!-- Trades Table -->
+                <div class="table-container">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Trade Date</th>
+                                <th>Series</th>
+                                <th>Security</th>
+                                <th>Type</th>
+                                <th>Quantity</th>
+                                <th>Price</th>
+                                <th>Value</th>
+                                <th>Currency</th>
+                                <th>Source</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="trade in tradeData">
+                                <td>{{ trade.trade_date }}</td>
+                                <td>{{ trade.series_number }}</td>
+                                <td>
+                                    <div><strong>{{ trade.security_name }}</strong></div>
+                                    <div class="small text-muted">{{ trade.security_id }}</div>
+                                </td>
+                                <td>
+                                    <span class="badge" :class="getTradeTypeBadgeClass(trade.trade_type)">
+                                        {{ trade.trade_type }}
+                                    </span>
+                                </td>
+                                <td>{{ formatNumber(trade.quantity) }}</td>
+                                <td>{{ formatNumber(trade.price) }}</td>
+                                <td>{{ formatNumber(trade.trade_value) }}</td>
+                                <td>{{ trade.currency }}</td>
+                                <td>
+                                    <div>{{ trade.source_folder }}</div>
+                                    <div class="small text-muted">{{ trade.source_file }}</div>
+                                </td>
+                            </tr>
+                            <tr v-if="tradeData.length === 0">
+                                <td colspan="9" class="text-center">No trades found matching your criteria</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Trade Pagination -->
+                <nav v-if="totalTradePages > 0">
+                    <ul class="pagination">
+                        <li class="page-item" :class="{ disabled: currentTradePage === 1 }">
+                            <a class="page-link" href="#" @click.prevent="changeTradePage(currentTradePage - 1)">Previous</a>
+                        </li>
+                        <li v-for="page in tradeMiddlePages" class="page-item" :class="{ active: page === currentTradePage }">
+                            <a class="page-link" href="#" @click.prevent="changeTradePage(page)">{{ page }}</a>
+                        </li>
+                        <li class="page-item" :class="{ disabled: currentTradePage === totalTradePages }">
+                            <a class="page-link" href="#" @click.prevent="changeTradePage(currentTradePage + 1)">Next</a>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+
+            <!-- Fetch Remote NAVs Modal -->
+            <div v-if="showFetchNav" class="modal-mask">
+                <div class="modal-container">
+                    <div class="modal-header">
+                        <h4>Fetch Remote NAVs</h4>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Date</label>
+                            <input type="date" v-model="fetchNavForm.date_str" class="form-control">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Filter Types</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="daily" v-model="fetchNavForm.isin_filters">
+                                <label class="form-check-label">Daily Series</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="weekly" v-model="fetchNavForm.isin_filters">
+                                <label class="form-check-label">Weekly Series</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="monthly" v-model="fetchNavForm.isin_filters">
+                                <label class="form-check-label">Monthly Series</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Specific ISINs</label>
+                            <div class="input-group mb-2">
+                                <input type="text" v-model="newIsin" class="form-control" placeholder="Enter ISIN">
+                                <button class="btn btn-outline-secondary" @click="addIsin('fetchNav')">Add</button>
+                            </div>
+                            <div v-if="fetchNavForm.isins.length > 0" class="mt-2">
+                                <div v-for="(isin, index) in fetchNavForm.isins" class="badge bg-secondary me-2 mb-2">
+                                    {{ isin }}
+                                    <button type="button" class="btn-close btn-close-white ms-2" 
+                                            @click="removeIsin('fetchNav', index)" aria-label="Close"></button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Series Number</label>
+                            <input type="text" v-model="fetchNavForm.series_number" class="form-control" placeholder="Enter Series Number">
+                        </div>
+                        <div v-if="loadingStates.fetchNav" class="alert alert-info">
+                            {{ progressMessages.fetchNav }}
+                        </div>
+                    </div>
                     <div class="modal-footer">
-                        <button class="btn btn-secondary" @click="showFetchNav = false" :disabled="loadingStates.fetchNav">Cancel</button>
+                        <button class="btn btn-secondary" @click="showFetchNav = false">Cancel</button>
                         <button class="btn btn-primary" @click="fetchRemoteNavs" :disabled="loadingStates.fetchNav">
-                            <span v-if="loadingStates.fetchNav">
-                                <span class="spinner-border spinner-border-sm me-1" role="status"></span>
-                                Processing...
-                            </span>
-                            <span v-else>Fetch NAVs</span>
+                            Fetch NAVs
                         </button>
                     </div>
                 </div>
@@ -1752,91 +1915,77 @@ def index():
             <div v-if="showGenerateTemplates" class="modal-mask">
                 <div class="modal-container">
                     <div class="modal-header">
-                        <h4 class="mb-0">Generate Templates</h4>
+                        <h4>Generate Templates</h4>
                     </div>
                     <div class="modal-body">
-                        <div v-if="loadingStates.generateTemplates" class="text-center mb-4">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <div class="mt-2">{{ progressMessages.generateTemplates }}</div>
+                        <div class="mb-3">
+                            <label class="form-label">Date</label>
+                            <input type="date" v-model="generateTemplatesForm.date_str" class="form-control">
                         </div>
-                        <div v-else>
-                            <div class="form-group mb-3">
-                                <label>Date</label>
-                                <input type="date" v-model="generateTemplatesForm.date_str" class="form-control" required>
+                        <div class="mb-3">
+                            <label class="form-label">Distribution Type</label>
+                            <select v-model="generateTemplatesForm.distribution_type" class="form-control" @change="updateEmailList">
+                                <option value="morningstar">Morningstar</option>
+                                <option value="six">SIX Financial</option>
+                                <option value="custom">Custom Email</option>
+                            </select>
+                        </div>
+                        <div v-if="generateTemplatesForm.distribution_type === 'custom'" class="mb-3">
+                            <label class="form-label">Custom Email</label>
+                            <input type="email" v-model="generateTemplatesForm.custom_email" class="form-control" placeholder="Enter email address">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Template Types</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="morningstar" v-model="generateTemplatesForm.template_types">
+                                <label class="form-check-label">Morningstar Template</label>
                             </div>
-                            <div class="form-group mb-3">
-                                <label>Distribution Type</label>
-                                <select v-model="generateTemplatesForm.distribution_type" class="form-control" @change="updateEmailList">
-                                    <option value="morningstar">Morningstar</option>
-                                    <option value="six">SIX</option>
-                                    <option value="custom">Custom Email</option>
-                                </select>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="six" v-model="generateTemplatesForm.template_types">
+                                <label class="form-check-label">SIX Financial Template</label>
                             </div>
-                            <div v-if="generateTemplatesForm.distribution_type === 'custom'" class="form-group mb-3">
-                                <label>Custom Email</label>
-                                <input type="email" v-model="generateTemplatesForm.custom_email" class="form-control" placeholder="Enter email address">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Filter Types</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="daily" v-model="generateTemplatesForm.isin_filters">
+                                <label class="form-check-label">Daily Series</label>
                             </div>
-                            <div v-else class="form-group mb-3">
-                                <label>Distribution Emails</label>
-                                <div class="alert alert-info py-2">
-                                    <small>Emails will be sent to the predefined distribution list for {{ generateTemplatesForm.distribution_type }}</small>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="weekly" v-model="generateTemplatesForm.isin_filters">
+                                <label class="form-check-label">Weekly Series</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" value="monthly" v-model="generateTemplatesForm.isin_filters">
+                                <label class="form-check-label">Monthly Series</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Specific ISINs</label>
+                            <div class="input-group mb-2">
+                                <input type="text" v-model="newIsin" class="form-control" placeholder="Enter ISIN">
+                                <button class="btn btn-outline-secondary" @click="addIsin('generateTemplates')">Add</button>
+                            </div>
+                            <div v-if="generateTemplatesForm.isins.length > 0" class="mt-2">
+                                <div v-for="(isin, index) in generateTemplatesForm.isins" class="badge bg-secondary me-2 mb-2">
+                                    {{ isin }}
+                                    <button type="button" class="btn-close btn-close-white ms-2" 
+                                            @click="removeIsin('generateTemplates', index)" aria-label="Close"></button>
                                 </div>
                             </div>
-                            <div class="form-group mb-3">
-                                <label>Filter Types</label>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="generateTemplatesForm.isin_filters" value="daily" class="form-check-input" id="dailyFilterGen">
-                                    <label class="form-check-label" for="dailyFilterGen">Daily</label>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="generateTemplatesForm.isin_filters" value="weekly" class="form-check-input" id="weeklyFilterGen">
-                                    <label class="form-check-label" for="weeklyFilterGen">Weekly</label>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="generateTemplatesForm.isin_filters" value="monthly" class="form-check-input" id="monthlyFilterGen">
-                                    <label class="form-check-label" for="monthlyFilterGen">Monthly</label>
-                                </div>
-                            </div>
-                            <div class="form-group mb-3">
-                                <label>ISINs</label>
-                                <div class="input-group mb-2">
-                                    <input type="text" v-model="newIsin" class="form-control" placeholder="Enter ISIN">
-                                    <button class="btn btn-outline-secondary" type="button" @click="addIsin('generateTemplates')">Add</button>
-                                </div>
-                                <div class="isin-list">
-                                    <div v-for="(isin, index) in generateTemplatesForm.isins" class="badge bg-primary me-2 mb-2">
-                                        {{ isin }}
-                                        <button class="btn-close btn-close-white ms-1" @click="removeIsin('generateTemplates', index)"></button>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="form-group" :class="{ 'mb-0': generateTemplatesForm.distribution_type !== 'custom' }">
-                                <label>Series Number</label>
-                                <input type="text" v-model="generateTemplatesForm.series_number" class="form-control" placeholder="Enter specific series number">
-                            </div>
-                            <div v-if="generateTemplatesForm.distribution_type === 'custom'" class="form-group mb-0">
-                                <label>Template Type</label>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="generateTemplatesForm.template_types" value="morningstar" class="form-check-input" id="morningstarTemplate">
-                                    <label class="form-check-label" for="morningstarTemplate">Morningstar</label>
-                                </div>
-                                <div class="form-check">
-                                    <input type="checkbox" v-model="generateTemplatesForm.template_types" value="six" class="form-check-input" id="sixTemplate">
-                                    <label class="form-check-label" for="sixTemplate">SIX</label>
-                                </div>
-                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Series Number</label>
+                            <input type="text" v-model="generateTemplatesForm.series_number" class="form-control" placeholder="Enter Series Number">
+                        </div>
+                        <div v-if="loadingStates.generateTemplates" class="alert alert-info">
+                            {{ progressMessages.generateTemplates }}
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button class="btn btn-secondary" @click="showGenerateTemplates = false" :disabled="loadingStates.generateTemplates">Cancel</button>
+                        <button class="btn btn-secondary" @click="showGenerateTemplates = false">Cancel</button>
                         <button class="btn btn-primary" @click="generateTemplates" :disabled="loadingStates.generateTemplates">
-                            <span v-if="loadingStates.generateTemplates">
-                                <span class="spinner-border spinner-border-sm me-1" role="status"></span>
-                                Processing...
-                            </span>
-                            <span v-else>Generate</span>
+                            Generate Templates
                         </button>
                     </div>
                 </div>
@@ -1932,6 +2081,16 @@ def index():
                     progressMessages: {
                         fetchNav: '',
                         generateTemplates: ''
+                    },
+                    tradeData: [],
+                    tradeSummary: null,
+                    currentTradePage: 1,
+                    totalTradePages: 1,
+                    tradeFilters: {
+                        series_number: '',
+                        startDate: '',
+                        endDate: '',
+                        security_type: ''
                     }
                 },
                 computed: {
@@ -2004,6 +2163,24 @@ def index():
                         }
                         if (this.currentFeePage + delta >= this.totalFeePages - 1) {
                             left = Math.max(2, this.totalFeePages - 4);
+                        }
+
+                        for (let i = left; i <= right; i++) {
+                            pages.push(i);
+                        }
+                        return pages;
+                    },
+                    tradeMiddlePages() {
+                        const delta = 2;
+                        let pages = [];
+                        let left = Math.max(2, this.currentTradePage - delta);
+                        let right = Math.min(this.totalTradePages - 1, this.currentTradePage + delta);
+
+                        if (this.currentTradePage - delta <= 2) {
+                            right = Math.min(this.totalTradePages - 1, 5);
+                        }
+                        if (this.currentTradePage + delta >= this.totalTradePages - 1) {
+                            left = Math.max(2, this.totalTradePages - 4);
                         }
 
                         for (let i = left; i <= right; i++) {
@@ -2412,6 +2589,74 @@ def index():
                             this.generateTemplatesForm.isins.splice(index, 1);
                         }
                     },
+                    loadTradeData() {
+                        const params = {
+                            page: this.currentTradePage,
+                            per_page: this.perPage,
+                            series_number: this.tradeFilters.series_number || undefined,
+                            start_date: this.tradeFilters.startDate || undefined,
+                            end_date: this.tradeFilters.endDate || undefined,
+                            security_type: this.tradeFilters.security_type || undefined
+                        };
+
+                        axios.get('/trades', { params })
+                            .then(response => {
+                                if (response.data.status === 'success') {
+                                    this.tradeData = response.data.data;
+                                    this.totalTradePages = response.data.pagination.total_pages;
+                                } else {
+                                    this.showSnackbar(response.data.message, 'error');
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error loading trade data:', error);
+                                this.showSnackbar('Error loading trade data: ' + error.message, 'error');
+                            });
+                    },
+                    loadTradeSummary() {
+                        axios.get('/trades/summary')
+                            .then(response => {
+                                if (response.data.status === 'success') {
+                                    this.tradeSummary = response.data.data;
+                                } else {
+                                    this.showSnackbar(response.data.message, 'error');
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error loading trade summary:', error);
+                                this.showSnackbar('Error loading trade summary: ' + error.message, 'error');
+                            });
+                    },
+                    changeTradePage(page) {
+                        if (page >= 1 && page <= this.totalTradePages) {
+                            this.currentTradePage = page;
+                            this.loadTradeData();
+                        }
+                    },
+                    clearTradeFilters() {
+                        this.tradeFilters = {
+                            series_number: '',
+                            startDate: '',
+                            endDate: '',
+                            security_type: ''
+                        };
+                        this.currentTradePage = 1;
+                        this.loadTradeData();
+                    },
+                    getTradeTypeBadgeClass(type) {
+                        switch (type?.toUpperCase()) {
+                            case 'BUY': return 'bg-success';
+                            case 'SELL': return 'bg-danger';
+                            default: return 'bg-secondary';
+                        }
+                    },
+                    formatNumber(value) {
+                        if (value === null || value === undefined) return '-';
+                        return new Intl.NumberFormat('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2
+                        }).format(value);
+                    },
                 },
                 mounted() {
                     this.loadData();
@@ -2424,6 +2669,9 @@ def index():
                             this.loadSeriesData();
                         } else if (newTab === 'fees') {
                             this.loadFeeStructures();
+                        } else if (newTab === 'trades') {
+                            this.loadTradeData();
+                            this.loadTradeSummary();
                         }
                     },
                     'filters.isin'() {
@@ -2457,6 +2705,22 @@ def index():
                     'seriesFilters.region'() {
                         this.currentSeriesPage = 1;
                         this.loadSeriesData();
+                    },
+                    'tradeFilters.series_number'() {
+                        this.currentTradePage = 1;
+                        this.loadTradeData();
+                    },
+                    'tradeFilters.startDate'() {
+                        this.currentTradePage = 1;
+                        this.loadTradeData();
+                    },
+                    'tradeFilters.endDate'() {
+                        this.currentTradePage = 1;
+                        this.loadTradeData();
+                    },
+                    'tradeFilters.security_type'() {
+                        this.currentTradePage = 1;
+                        this.loadTradeData();
                     }
                 }
             });
@@ -2479,6 +2743,145 @@ def handle_error(error):
         response['traceback'] = traceback.format_exc()
 
     return jsonify(response), 500
+
+
+@app.route('/trades', methods=['GET'])
+@require_api_key
+def get_trades():
+    """Get paginated trade data with filtering options"""
+    try:
+        # Get query parameters
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+        series_number = request.args.get('series_number')
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        security_type = request.args.get('security_type')
+        trade_type = request.args.get('trade_type')
+
+        # Convert dates if provided
+        if start_date:
+            start_date = datetime.strptime(start_date, '%Y-%m-%d')
+        if end_date:
+            end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+        with processor.db_service.SessionMaker() as session:
+            query = session.query(Trade)
+
+            # Apply filters
+            if series_number:
+                query = query.filter(Trade.series_number == series_number)
+            if start_date:
+                query = query.filter(Trade.trade_date >= start_date)
+            if end_date:
+                query = query.filter(Trade.trade_date <= end_date)
+            if security_type:
+                query = query.filter(Trade.security_type == security_type)
+            if trade_type:
+                query = query.filter(Trade.trade_type == trade_type)
+
+            # Get total count
+            total = query.count()
+
+            # Apply pagination
+            trades = query.order_by(Trade.trade_date.desc())\
+                .offset((page - 1) * per_page)\
+                .limit(per_page)\
+                .all()
+
+            response = {
+                'status': 'success',
+                'data': [
+                    {
+                        'id': trade.id,
+                        'series_number': trade.series_number,
+                        'trade_date': trade.trade_date.strftime('%Y-%m-%d'),
+                        'trade_type': trade.trade_type,
+                        'security_type': trade.security_type,
+                        'security_name': trade.security_name,
+                        'security_id': trade.security_id,
+                        'quantity': trade.quantity,
+                        'price': trade.price,
+                        'currency': trade.currency,
+                        'settlement_date': trade.settlement_date.strftime('%Y-%m-%d') if trade.settlement_date else None,
+                        'trade_value': trade.trade_value,
+                        'broker': trade.broker,
+                        'account': trade.account,
+                        'source_file': trade.source_file,
+                        'source_folder': trade.source_folder
+                    }
+                    for trade in trades
+                ],
+                'pagination': {
+                    'current_page': page,
+                    'per_page': per_page,
+                    'total_pages': math.ceil(total / per_page),
+                    'total_entries': total
+                }
+            }
+
+            return jsonify(response), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trades/summary', methods=['GET'])
+@require_api_key
+def get_trades_summary():
+    """Get summary statistics about trades"""
+    try:
+        with processor.db_service.SessionMaker() as session:
+            # Get total trades
+            total_trades = session.query(Trade).count()
+
+            # Get trades by source folder
+            trades_by_folder = session.query(
+                Trade.source_folder,
+                func.count(Trade.id)
+            ).group_by(Trade.source_folder).all()
+
+            # Get trades by security type
+            trades_by_security_type = session.query(
+                Trade.security_type,
+                func.count(Trade.id)
+            ).group_by(Trade.security_type).all()
+
+            # Get date range
+            date_range = session.query(
+                func.min(Trade.trade_date),
+                func.max(Trade.trade_date)
+            ).first()
+
+            response = {
+                'status': 'success',
+                'data': {
+                    'total_trades': total_trades,
+                    'trades_by_folder': [
+                        {'folder': folder, 'count': count}
+                        for folder, count in trades_by_folder
+                    ],
+                    'trades_by_security_type': [
+                        {'type': type_, 'count': count}
+                        for type_, count in trades_by_security_type
+                    ],
+                    'date_range': {
+                        'earliest': date_range[0].strftime('%Y-%m-%d') if date_range[0] else None,
+                        'latest': date_range[1].strftime('%Y-%m-%d') if date_range[1] else None
+                    }
+                }
+            }
+
+            return jsonify(response), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 if __name__ == '__main__':
