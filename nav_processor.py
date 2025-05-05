@@ -20,7 +20,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 import threading
 import time
-from models import Series
+from models import Series, SeriesStatus
+from ftp_service import FTPService
+from template_processor import TemplateProcessor
+from sqlalchemy import func
+
+logger = logging.getLogger(__name__)
 
 
 class NAVProcessor:
@@ -40,8 +45,7 @@ class NAVProcessor:
             max_workers (int): Maximum number of concurrent workers for file operations
         """
         self.mode = mode.lower()
-        self.ftp_configs = ftp_configs or {}
-        self.smtp_config = smtp_config
+        self.ftp_service = FTPService(ftp_configs) if ftp_configs else None
         self.email_sender = EmailSender(smtp_config) if smtp_config else None
         self.drive_service = GoogleDriveService(
             drive_config['credentials_path']) if drive_config else None
@@ -63,6 +67,10 @@ class NAVProcessor:
         self.template_dir = self.input_dir / "template"
         self.temp_dir = Path(tempfile.gettempdir()) / "nav_processor"
 
+        # Initialize template processor
+        self.template_processor = TemplateProcessor(
+            self.template_dir, self.output_dir)
+
         # Create directories if in local mode
         if self.mode == "local":
             self._create_directories()
@@ -73,8 +81,9 @@ class NAVProcessor:
             directory.mkdir(parents=True, exist_ok=True)
 
         # Create emitter subdirectories
-        for emitter in self.ftp_configs.keys():
-            (self.input_dir / emitter).mkdir(exist_ok=True)
+        if self.ftp_service:
+            for emitter in self.ftp_service.config.keys():
+                (self.input_dir / emitter).mkdir(exist_ok=True)
 
     @contextmanager
     def _temp_file_handler(self, filename: str):
@@ -104,7 +113,7 @@ class NAVProcessor:
 
     def _read_csv_remote(self, filename: str, emitter: str, temp_file: Path) -> Optional[pd.DataFrame]:
         """Read CSV file from FTP server with improved error handling"""
-        ftp_config = self.ftp_configs.get(emitter)
+        ftp_config = self.ftp_service.config.get(emitter)
         if not ftp_config:
             raise ValueError(
                 f"No FTP configuration found for emitter {emitter}")
@@ -189,31 +198,11 @@ class NAVProcessor:
         try:
             # Create a unique temporary file for each download
             temp_file = self.temp_dir / f"{emitter}_{filename}"
-            df = self._read_csv_remote(filename, emitter, temp_file)
+            df = self.ftp_service.download_file(emitter, filename, temp_file)
 
             if df is not None:
                 # Clean up the DataFrame
-                # Remove unnamed columns
-                unnamed_cols = [col for col in df.columns if 'Unnamed' in col]
-                if unnamed_cols:
-                    df = df.drop(columns=unnamed_cols)
-
-                # Clean up column names
-                df.columns = df.columns.str.strip()
-
-                # Convert date column to datetime
-                if 'Valuation Period-End Date' in df.columns:
-                    df['Valuation Period-End Date'] = pd.to_datetime(
-                        df['Valuation Period-End Date'])
-
-                # Clean up ISIN values
-                if 'ISIN' in df.columns:
-                    df['ISIN'] = df['ISIN'].str.strip()
-
-                # Clean up NAV values
-                if 'NAV' in df.columns:
-                    df['NAV'] = pd.to_numeric(df['NAV'].astype(
-                        str).str.replace(',', ''), errors='coerce')
+                df = self._clean_dataframe(df)
 
                 # Save to input directory
                 input_path = self.input_dir / emitter / filename
@@ -224,12 +213,7 @@ class NAVProcessor:
                     # Add to upload queue
                     self.upload_queue.put((emitter, filename))
 
-                self.logger.debug(f"Processed {emitter} file: {filename}")
-                self.logger.debug(f"DataFrame shape: {df.shape}")
-                self.logger.debug(f"Unique ISINs: {df['ISIN'].unique()}")
-                self.logger.debug(
-                    f"Date range: {df['Valuation Period-End Date'].min()} to {df['Valuation Period-End Date'].max()}")
-
+                self.logger.info(f"Processed {emitter} file: {filename}")
                 return df if not df.empty else None
         except Exception as e:
             if "550" not in str(e):  # Only log non-404 errors
@@ -243,6 +227,36 @@ class NAVProcessor:
                     temp_file.unlink()
                 except:
                     pass
+
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Clean and standardize DataFrame"""
+        # Remove unnamed columns
+        unnamed_cols = [col for col in df.columns if 'Unnamed' in col]
+        if unnamed_cols:
+            df = df.drop(columns=unnamed_cols)
+
+        # Clean up column names
+        df.columns = df.columns.str.strip()
+
+        # Convert date column to datetime
+        if 'Valuation Period-End Date' in df.columns:
+            df['Valuation Period-End Date'] = pd.to_datetime(
+                df['Valuation Period-End Date'])
+
+        # Clean up ISIN values
+        if 'ISIN' in df.columns:
+            df['ISIN'] = df['ISIN'].str.strip()
+
+        # Clean up NAV values
+        if 'NAV' in df.columns:
+            df['NAV'] = pd.to_numeric(df['NAV'].astype(
+                str).str.replace(',', ''), errors='coerce')
+
+        # Standardize frequency values to uppercase
+        if 'Frequency' in df.columns:
+            df['Frequency'] = df['Frequency'].str.upper()
+
+        return df
 
     def _upload_worker(self):
         """Worker function for Google Drive uploads with retry logic"""
@@ -275,6 +289,13 @@ class NAVProcessor:
             finally:
                 self.upload_queue.task_done()
 
+    def _get_series_info(self, isins: Set[str]) -> Dict[str, object]:
+        """Get series information from database"""
+        with self.db_service.SessionMaker() as session:
+            series_info = session.query(Series).filter(
+                Series.isin.in_(isins)).all()
+            return {s.isin: s for s in series_info}
+
     def _process_nav_files(self, date_str: str, target_isins: Optional[Set[str]] = None,
                            exclude_isins: Optional[Set[str]] = None) -> List[Tuple[str, pd.DataFrame]]:
         """Process NAV files concurrently and return list of (emitter, dataframe) tuples."""
@@ -304,13 +325,13 @@ class NAVProcessor:
                         missing_files.append(filename)
                         continue
 
-                    # Convert columns to appropriate types
-                    df['Frequency'] = df['Frequency'].astype(str).str.upper()
-                    df['ISIN'] = df['ISIN'].astype(str).str.strip()
-                    df['NAV'] = pd.to_numeric(df['NAV'].astype(
-                        str).str.replace(',', ''), errors='coerce')
-                    df['Valuation Period-End Date'] = pd.to_datetime(
-                        df['Valuation Period-End Date'])
+                    # Clean up the DataFrame
+                    df = self._clean_dataframe(df)
+
+                    # Drop rows with missing required values
+                    required_cols = ['ISIN', 'NAV',
+                                     'Valuation Period-End Date']
+                    df = df.dropna(subset=required_cols)
 
                     # Apply ISIN filters
                     if target_isins:
@@ -319,7 +340,19 @@ class NAVProcessor:
                         df = df[~df['ISIN'].isin(exclude_isins)]
 
                     if not df.empty:
-                        nav_dfs.append((emitter, df))
+                        # Add a file_type column to track the file source
+                        if 'Wrappers Hybrid' in filename:
+                            df['file_type'] = 'hybrid'
+                            nav_dfs.append((emitter, df))
+                        elif 'Loan' in filename:
+                            df['file_type'] = 'loan'
+                            nav_dfs.append((emitter, df))
+                        else:
+                            df['file_type'] = 'standard'
+                            nav_dfs.append((emitter, df))
+
+                        self.logger.info(
+                            f"Processed {emitter} file: {filename}")
 
                 except Exception as e:
                     self.logger.error(f"Error processing {filename}: {str(e)}")
@@ -419,11 +452,8 @@ Many thanks,""")
 
         for emitter, df in nav_dfs:
             if not df.empty:
-                self.logger.debug(f"Saving {emitter} data to database")
-                self.logger.debug(f"DataFrame shape: {df.shape}")
-                self.logger.debug(f"Unique ISINs: {df['ISIN'].unique()}")
-                self.logger.debug(
-                    f"Unique frequencies: {df['Frequency'].unique()}")
+                self.logger.info(
+                    f"Processing {emitter} data: {len(df)} entries")
 
                 added, duplicates, invalids = self.db_service.save_nav_entries(
                     df, distribution_type, emitter)
@@ -431,15 +461,15 @@ Many thanks,""")
                 total_duplicates += duplicates
                 total_invalids += invalids
 
-                self.logger.debug(
+                self.logger.info(
                     f"{emitter} results - Added: {added}, Duplicates: {duplicates}, Invalids: {invalids}")
 
-        # Only log the final summary
+        # Log final summary
         self.logger.info(
-            f"Database Import Results:\n"
-            f"  Added entries: {total_added}\n"
-            f"  Duplicate entries skipped: {total_duplicates}\n"
-            f"  Invalid entries skipped: {total_invalids}"
+            f"Database Import Summary:\n"
+            f"  Added: {total_added}\n"
+            f"  Duplicates: {total_duplicates}\n"
+            f"  Invalids: {total_invalids}"
         )
         return total_added, total_duplicates, total_invalids
 
@@ -597,11 +627,13 @@ Many thanks,""")
         """
         try:
             # Clean up directories
-            self._cleanup_output_directory()
+            self.template_processor._cleanup_output_directory()
 
             # Clean up emitter directories
-            for emitter in self.ftp_configs.keys():
-                self._cleanup_emitter_directory(emitter)
+            if self.ftp_service:
+                for emitter in self.ftp_service.config.keys():
+                    self.ftp_service.cleanup_emitter_directory(
+                        emitter, self.input_dir)
 
             # Process ISIN filters
             target_isins = self._get_target_isins(isin_filter)
@@ -624,12 +656,18 @@ Many thanks,""")
             for template_type in template_types:
                 try:
                     if template_type.lower() == 'morningstar':
-                        output_path = self._update_morningstar_template(
+                        output_path = self.template_processor.update_morningstar_template(
                             nav_dfs, date_str)
                         output_paths.append(output_path)
                     elif template_type.lower() == 'six':
-                        output_path = self._update_six_template(
-                            nav_dfs, date_str)
+                        # Get series information for SIX template
+                        all_isins = set()
+                        for _, df in nav_dfs:
+                            all_isins.update(df['ISIN'].unique())
+                        series_info = self._get_series_info(all_isins)
+
+                        output_path = self.template_processor.update_six_template(
+                            nav_dfs, date_str, series_info)
                         output_paths.append(output_path)
                     else:
                         self.logger.warning(
@@ -695,65 +733,6 @@ Many thanks,""")
             self.cleanup()
             raise
 
-    def _update_morningstar_template(self, nav_dfs: List[Tuple[str, pd.DataFrame]], date_str: str) -> Path:
-        """Update template with NAV data and return output path."""
-        # Read template
-        wb = xlrd.open_workbook(
-            self.template_dir / "Morningstar Performance Template.xls",
-            formatting_info=True
-        )
-        template_sheet = wb.sheet_by_name('NAVs')
-        wb_output = xlutils.copy.copy(wb)
-        sheet_output = wb_output.get_sheet('NAVs')
-
-        # Get column mappings
-        header_row = 7
-        col_indices = {
-            template_sheet.cell_value(header_row, col_idx): col_idx
-            for col_idx in range(template_sheet.ncols)
-        }
-
-        # Update template with NAV data
-        mapping = {
-            'Unique Identifier': 'ISIN',
-            'NAV/Daily dividend Date': 'Valuation Period-End Date',
-            'NAV': 'NAV'
-        }
-
-        # Combine all DataFrames
-        nav_df = pd.concat([df for _, df in nav_dfs], ignore_index=True)
-
-        # Update the data starting from row 8
-        for i, row in nav_df.iterrows():
-            row_idx = i + 8
-            for template_col, nav_col in mapping.items():
-                if template_col in col_indices:
-                    col_idx = col_indices[template_col]
-                    value = row[nav_col]
-
-                    # Special handling for dates - convert to string format
-                    if template_col == 'NAV/Daily dividend Date':
-                        if isinstance(value, pd.Timestamp):
-                            value = value.strftime('%m/%d/%Y')
-                        else:
-                            try:
-                                date_obj = pd.to_datetime(value)
-                                value = date_obj.strftime('%m/%d/%Y')
-                            except:
-                                pass
-                    sheet_output.write(row_idx, col_idx, value)
-
-        # Save updated template
-        date_obj = pd.to_datetime(date_str, format='%m%d%Y')
-        formatted_date = date_obj.strftime('%m.%d.%Y')
-        output_path = self.output_dir / \
-            f'Flexfunds ETPs - NAVs {formatted_date}.xls'
-        wb_output.save(str(output_path))
-
-        self.logger.info(
-            f"Successfully processed NAV files and saved output to {output_path}")
-        return output_path
-
     def _read_exclude_isins(self) -> Set[str]:
         """Read and return set of ISINs to exclude."""
         exclude_isins = set()
@@ -800,25 +779,15 @@ Many thanks,""")
 
         return target_isins if target_isins else None
 
-    def _get_isins_by_frequency(self, frequency: str) -> Set[str]:
-        """
-        Get ISINs for a specific NAV frequency from the database.
-
-        Args:
-            frequency (str): NAV frequency ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY')
-
-        Returns:
-            Set[str]: Set of ISINs with the specified frequency
-        """
+    def _get_isins_by_frequency(self, frequency: str) -> List[str]:
+        """Get ISINs for a specific NAV frequency."""
+        # Convert frequency to uppercase for consistent comparison
+        frequency = frequency.upper()
         with self.db_service.SessionMaker() as session:
-            # Convert frequency to uppercase for case-insensitive matching
-            frequency = frequency.upper()
-            isins = session.query(Series.isin).filter(
-                # Use ilike for case-insensitive matching
-                Series.nav_frequency.ilike(frequency),
-                Series.status == 'ACTIVE'  # Only get active series
-            ).all()
-            return {isin[0] for isin in isins}
+            return [r[0] for r in session.query(Series.isin)
+                    .filter(func.upper(Series.nav_frequency) == frequency)
+                    .filter(Series.status == SeriesStatus.ACTIVE)
+                    .all()]
 
     def import_historic_data(self, excel_path: str):
         """

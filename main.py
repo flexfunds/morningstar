@@ -68,43 +68,43 @@ processor = NAVProcessor(
 
 # Process NAVs and send email
 # Example 1: Process all ISINs (original behavior)
-processor.process_navs(
-    date_str="03212025",
-    send_email=True,
-    to_emails=["productoperations@flexfunds.com", "nav@morningstareurope.com"],
-    # to_emails=["sebastian.masia@flexfundsetp.com"],
-    distribution_type="morningstar",
-    isin_filter=["daily", "weekly"],
-    template_types=["morningstar"]
-)
+# processor.process_navs(
+#     date_str="04172025",
+#     send_email=True,
+#     # to_emails=["productoperations@flexfunds.com", "nav@morningstareurope.com"],
+#     to_emails=["sebastian.masia@flexfundsetp.com"],
+#     distribution_type="morningstar",
+#     isin_filter=["daily", "weekly"],
+#     template_types=["morningstar"]
+# )
 
-processor.process_navs(
-    date_str="03212025",
-    send_email=True,
-    to_emails=["data-qc-usa@six-financial-information.com",
-               "dc.us@telekurs.com",
-               "Darren.Smith@six-group.com",
-               "matthew.leventhal@six-group.com",
-               "dpsfixedincome.us@six-group.com",
-               "notification.us@six-financial-information.com",
-               "usdata.us@six-group.com",
-               "notification.eurobonds@six-financial-information.com",
-               "productoperations@flexfunds.com",
-               ],
-    # to_emails=["sebastian.masia@flexfundsetp.com"],
-    distribution_type="six",
-    isin_filter=["daily", "weekly"],
-    template_types=["six"]
-)
+# processor.process_navs(
+#     date_str="04172025",
+#     send_email=True,
+#     # to_emails=["data-qc-usa@six-financial-information.com",
+#     #            "dc.us@telekurs.com",
+#     #            "Darren.Smith@six-group.com",
+#     #            "matthew.leventhal@six-group.com",
+#     #            "dpsfixedincome.us@six-group.com",
+#     #            "notification.us@six-financial-information.com",
+#     #            "usdata.us@six-group.com",
+#     #            "notification.eurobonds@six-financial-information.com",
+#     #            "productoperations@flexfunds.com",
+#     #            ],
+#     to_emails=["sebastian.masia@flexfundsetp.com"],
+#     distribution_type="six",
+#     isin_filter=["daily", "weekly"],
+#     template_types=["six"]
+# )
 # Example 2: Process only daily ISINs
 # processor.process_navs(
 #     date_str="02072025",
 #     distribution="six"  # This will use the predefined daily set
 # )
 
-# processor.import_historic_data(
-#     excel_path="C:/Users/a/Documents/FlexFunds/morningstar/input/template/NAVs Historical Prices 02.07.2025.xlsx"
-# )
+processor.import_historic_data(
+    excel_path="C:/Users/a/Documents/FlexFunds/morningstar/input/template/Historical Prices DataBase.xlsx"
+)
 
 # processor.process_navs(
 #     date_str="02122025",

@@ -106,7 +106,8 @@ class NAVEntry(Base):
 
     # Add unique constraint
     __table_args__ = (
-        UniqueConstraint('isin', 'nav_date', name='uix_nav_entry_isin_date'),
+        UniqueConstraint('isin', 'nav_date',
+                         name='uix_nav_entry_isin_date'),
     )
 
     # Relationship

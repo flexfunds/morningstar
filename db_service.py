@@ -238,11 +238,11 @@ class DatabaseService:
             print(f"\nProcessing {emitter} data:")
             print(f"Total rows in DataFrame: {len(nav_df)}")
             print(f"Valid ISINs in database: {len(valid_isins)}")
-
-            # First, get existing entries to avoid duplicates (only check ISIN and date)
+            # First, get existing entries to avoid duplicates (check ISIN, date, AND emitter)
             existing_entries = set()
-            for entry in session.query(NAVEntry.isin, NAVEntry.nav_date).all():
-                existing_entries.add((entry.isin, entry.nav_date))
+            for entry in session.query(NAVEntry.isin, NAVEntry.nav_date, NAVEntry.emitter).all():
+                existing_entries.add(
+                    (entry.isin, entry.nav_date, entry.emitter))
 
             print(f"Existing entries in database: {len(existing_entries)}")
 
@@ -255,28 +255,37 @@ class DatabaseService:
                     nav_date = pd.to_datetime(
                         row['Valuation Period-End Date']).date()
                     isin = row['ISIN']
-                    entry_key = (isin, nav_date)
+                    entry_key = (isin, nav_date, emitter)
+
+                    print(
+                        f"\nProcessing entry - ISIN: {isin}, Date: {nav_date}, Emitter: {emitter}")
+                    print(f"NAV value: {row['NAV']}")
 
                     # Skip if entry already exists
                     if entry_key in existing_entries:
+                        print(f"Skipping duplicate entry: {entry_key}")
                         duplicates_count += 1
                         continue
 
                     # Skip if series doesn't exist
                     if isin not in valid_isins:
-                        print(f"Invalid ISIN: {isin}")
+                        print(f"Invalid ISIN (not in series table): {isin}")
                         invalid_series_count += 1
                         continue
+
+                    # Convert NAV value to float, handling any commas in the number
+                    nav_value = float(str(row['NAV']).replace(',', ''))
 
                     entry = NAVEntry(
                         isin=isin,
                         nav_date=nav_date,
-                        nav_value=float(row['NAV']),
+                        nav_value=nav_value,
                         distribution_type=distribution_type,
                         emitter=emitter,
                         series_number=None  # We'll update this in a second pass
                     )
                     entries_to_add.append(entry)
+                    print(f"Entry prepared for database: {entry}")
                 except Exception as e:
                     print(f"Error processing row: {row}")
                     print(f"Error details: {str(e)}")
@@ -288,42 +297,60 @@ class DatabaseService:
             print(f"Invalid series skipped: {invalid_series_count}")
 
             if entries_to_add:
-                # First try bulk insert
-                try:
-                    session.bulk_save_objects(entries_to_add)
-                    session.commit()
-                    print(f"Successfully added {len(entries_to_add)} entries")
-                except Exception as e:
-                    # If bulk insert fails, try individual inserts
-                    session.rollback()
-                    print(f"Bulk insert failed: {str(e)}")
-                    print("Falling back to individual inserts...")
+                # Skip bulk operations and go straight to individual processing
+                added_count = 0
+                for entry in entries_to_add:
+                    try:
+                        # Check if an entry with this ISIN and date already exists
+                        existing = session.query(NAVEntry).filter(
+                            NAVEntry.isin == entry.isin,
+                            NAVEntry.nav_date == entry.nav_date
+                        ).first()
 
-                    added_count = 0
-                    for entry in entries_to_add:
-                        try:
+                        if existing:
+                            # If it exists but with a different emitter, update
+                            if existing.emitter != entry.emitter:
+                                print(
+                                    f"Updating entry for {entry.isin} on {entry.nav_date} from emitter {existing.emitter} to {entry.emitter}")
+                                existing.nav_value = entry.nav_value
+                                existing.distribution_type = entry.distribution_type
+                                existing.emitter = entry.emitter
+                                session.commit()
+                                added_count += 1
+                            else:
+                                # If it exists with the same emitter, skip
+                                print(
+                                    f"Entry already exists with emitter {entry.emitter}, skipping...")
+                                duplicates_count += 1
+                        else:
+                            # If it doesn't exist, insert
                             session.add(entry)
                             session.commit()
                             added_count += 1
-                        except Exception as e:
-                            session.rollback()
-                            print(
-                                f"Failed to add entry for ISIN {entry.isin}: {str(e)}")
-                            duplicates_count += 1
-                            continue
+                    except Exception as e:
+                        session.rollback()
+                        print(
+                            f"Failed to process entry for ISIN {entry.isin}: {str(e)}")
+                        continue
 
-                    # Update the entries_to_add list to only include successfully added entries
-                    entries_to_add = entries_to_add[:added_count]
-                    print(
-                        f"Successfully added {added_count} entries individually")
+                print(
+                    f"Successfully processed {added_count} entries individually")
 
                 # Update series_number for the newly added entries
-                if entries_to_add:
+                if added_count > 0:
+                    # Get the most recent entries
+                    new_entries = session.query(NAVEntry)\
+                        .filter(NAVEntry.emitter == emitter)\
+                        .order_by(NAVEntry.id.desc())\
+                        .limit(added_count)\
+                        .all()
+
+                    # Update series numbers
                     series_info = {isin: number for isin, number in session.query(
                         Series.isin, Series.series_number).all()}
-                    for entry in entries_to_add:
+                    for entry in new_entries:
                         entry.series_number = series_info.get(entry.isin)
-                    session.bulk_save_objects(entries_to_add)
+
                     session.commit()
                     print("Updated series numbers for added entries")
 
