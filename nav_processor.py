@@ -57,8 +57,16 @@ class NAVProcessor:
         self.upload_queue = Queue()
 
         # Configure logging
-        logging.basicConfig(level=logging.DEBUG)
-        logging.getLogger('ftplib').setLevel(logging.DEBUG)
+        logging.basicConfig(level=logging.INFO)
+
+        # Set more restrictive logging for noisy libraries
+        logging.getLogger('ftplib').setLevel(logging.WARNING)
+        logging.getLogger('googleapiclient').setLevel(logging.WARNING)
+        logging.getLogger('google_auth_httplib2').setLevel(logging.WARNING)
+        logging.getLogger('googleapiclient.discovery').setLevel(
+            logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+
         self.logger = logging.getLogger(__name__)
 
         # Define file structure with existing paths
@@ -213,12 +221,13 @@ class NAVProcessor:
                     # Add to upload queue
                     self.upload_queue.put((emitter, filename))
 
-                self.logger.info(f"Processed {emitter} file: {filename}")
+                # Only log non-empty dataframes
+                if not df.empty:
+                    self.logger.debug(f"Processed {emitter} file: {filename}")
                 return df if not df.empty else None
         except Exception as e:
             if "550" not in str(e):  # Only log non-404 errors
-                self.logger.error(
-                    f"Error processing {filename} from {emitter}: {str(e)}")
+                self.logger.error(f"Error: {filename} from {emitter}")
             return None
         finally:
             # Clean up temp file
@@ -276,14 +285,16 @@ class NAVProcessor:
                                 input_path,
                                 self.drive_config['input_folder_id']
                             )
-                            self.logger.info(
-                                f"Successfully uploaded {filename} to Google Drive")
+                            # Reduced log verbosity
+                            if retry_count > 0:  # Only log if we had to retry
+                                self.logger.info(
+                                    f"Uploaded {filename} after {retry_count} retries")
                             break
                         except Exception as e:
                             retry_count += 1
                             if retry_count == max_retries:
                                 self.logger.error(
-                                    f"Failed to upload {filename} to Google Drive after {max_retries} attempts: {str(e)}")
+                                    f"Failed to upload {filename} after {max_retries} attempts")
                             else:
                                 time.sleep(1)  # Wait before retry
             finally:
@@ -452,6 +463,7 @@ Many thanks,""")
 
         for emitter, df in nav_dfs:
             if not df.empty:
+                # More concise log
                 self.logger.info(
                     f"Processing {emitter} data: {len(df)} entries")
 
@@ -461,16 +473,15 @@ Many thanks,""")
                 total_duplicates += duplicates
                 total_invalids += invalids
 
-                self.logger.info(
-                    f"{emitter} results - Added: {added}, Duplicates: {duplicates}, Invalids: {invalids}")
+                # Simplify this log to be less cluttered
+                if added > 0:
+                    self.logger.info(f"{emitter}: Added {added} entries")
 
-        # Log final summary
-        self.logger.info(
-            f"Database Import Summary:\n"
-            f"  Added: {total_added}\n"
-            f"  Duplicates: {total_duplicates}\n"
-            f"  Invalids: {total_invalids}"
-        )
+        # Log final summary in a more concise format
+        if total_added > 0 or total_duplicates > 0:
+            self.logger.info(
+                f"DB Import: {total_added} added, {total_duplicates} duplicates, {total_invalids} invalid")
+
         return total_added, total_duplicates, total_invalids
 
     def _update_six_template(self, nav_dfs: List[Tuple[str, pd.DataFrame]], date_str: str) -> Path:
@@ -702,25 +713,29 @@ Many thanks,""")
 
             # Upload to Drive if configured
             if self.drive_service:
+                uploads_count = 0
                 for output_path in output_paths:
                     # Upload to appropriate folder based on template type
                     for template_type in template_types:
                         if template_type.lower() == 'morningstar' and self.drive_config.get('morningstar_output_folder_id'):
                             if 'Flexfunds ETPs - NAVs' in output_path.name:
-                                self.logger.info(
-                                    f"Uploading Morningstar template to Drive: {output_path.name}")
+                                uploads_count += 1
                                 self.drive_service.upload_file(
                                     output_path,
                                     self.drive_config['morningstar_output_folder_id']
                                 )
                         elif template_type.lower() == 'six' and self.drive_config.get('six_output_folder_id'):
                             if 'LAM_SFI_Price' in output_path.name:
-                                self.logger.info(
-                                    f"Uploading SIX template to Drive: {output_path.name}")
+                                uploads_count += 1
                                 self.drive_service.upload_file(
                                     output_path,
                                     self.drive_config['six_output_folder_id']
                                 )
+
+                # Single consolidated log message
+                if uploads_count > 0:
+                    self.logger.info(
+                        f"Uploaded {uploads_count} template(s) to Google Drive")
 
             # Save to database
             self._save_to_database(nav_dfs, distribution_type)
@@ -836,6 +851,21 @@ Many thanks,""")
         except Exception as e:
             self.logger.error(f"Error retrieving NAV history: {str(e)}")
             raise
+
+    def set_debug_logging(self, enable=True):
+        """Enable or disable detailed debug logging."""
+        if enable:
+            # Set verbose logging
+            self.logger.setLevel(logging.DEBUG)
+            logging.getLogger('googleapiclient').setLevel(logging.DEBUG)
+            logging.getLogger('google_auth_httplib2').setLevel(logging.DEBUG)
+            logging.getLogger('ftplib').setLevel(logging.DEBUG)
+        else:
+            # Restore normal logging
+            self.logger.setLevel(logging.INFO)
+            logging.getLogger('googleapiclient').setLevel(logging.WARNING)
+            logging.getLogger('google_auth_httplib2').setLevel(logging.WARNING)
+            logging.getLogger('ftplib').setLevel(logging.WARNING)
 
 
 def main():

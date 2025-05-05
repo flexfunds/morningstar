@@ -235,16 +235,11 @@ class DatabaseService:
             valid_isins = set(isin[0]
                               for isin in session.query(Series.isin).all())
 
-            print(f"\nProcessing {emitter} data:")
-            print(f"Total rows in DataFrame: {len(nav_df)}")
-            print(f"Valid ISINs in database: {len(valid_isins)}")
             # First, get existing entries to avoid duplicates (check ISIN, date, AND emitter)
             existing_entries = set()
             for entry in session.query(NAVEntry.isin, NAVEntry.nav_date, NAVEntry.emitter).all():
                 existing_entries.add(
                     (entry.isin, entry.nav_date, entry.emitter))
-
-            print(f"Existing entries in database: {len(existing_entries)}")
 
             entries_to_add = []
             duplicates_count = 0
@@ -257,19 +252,13 @@ class DatabaseService:
                     isin = row['ISIN']
                     entry_key = (isin, nav_date, emitter)
 
-                    print(
-                        f"\nProcessing entry - ISIN: {isin}, Date: {nav_date}, Emitter: {emitter}")
-                    print(f"NAV value: {row['NAV']}")
-
                     # Skip if entry already exists
                     if entry_key in existing_entries:
-                        print(f"Skipping duplicate entry: {entry_key}")
                         duplicates_count += 1
                         continue
 
                     # Skip if series doesn't exist
                     if isin not in valid_isins:
-                        print(f"Invalid ISIN (not in series table): {isin}")
                         invalid_series_count += 1
                         continue
 
@@ -285,16 +274,14 @@ class DatabaseService:
                         series_number=None  # We'll update this in a second pass
                     )
                     entries_to_add.append(entry)
-                    print(f"Entry prepared for database: {entry}")
                 except Exception as e:
-                    print(f"Error processing row: {row}")
-                    print(f"Error details: {str(e)}")
+                    print(
+                        f"Error processing row {isin} ({nav_date}): {str(e)}")
                     continue
 
-            print(f"\nResults for {emitter}:")
-            print(f"Entries to add: {len(entries_to_add)}")
-            print(f"Duplicates skipped: {duplicates_count}")
-            print(f"Invalid series skipped: {invalid_series_count}")
+            # Print concise summary
+            print(
+                f"Processing {emitter} data: {len(nav_df)} rows, {len(entries_to_add)} to add, {duplicates_count} duplicates, {invalid_series_count} invalid")
 
             if entries_to_add:
                 # Skip bulk operations and go straight to individual processing
@@ -310,8 +297,6 @@ class DatabaseService:
                         if existing:
                             # If it exists but with a different emitter, update
                             if existing.emitter != entry.emitter:
-                                print(
-                                    f"Updating entry for {entry.isin} on {entry.nav_date} from emitter {existing.emitter} to {entry.emitter}")
                                 existing.nav_value = entry.nav_value
                                 existing.distribution_type = entry.distribution_type
                                 existing.emitter = entry.emitter
@@ -319,8 +304,6 @@ class DatabaseService:
                                 added_count += 1
                             else:
                                 # If it exists with the same emitter, skip
-                                print(
-                                    f"Entry already exists with emitter {entry.emitter}, skipping...")
                                 duplicates_count += 1
                         else:
                             # If it doesn't exist, insert
@@ -332,9 +315,6 @@ class DatabaseService:
                         print(
                             f"Failed to process entry for ISIN {entry.isin}: {str(e)}")
                         continue
-
-                print(
-                    f"Successfully processed {added_count} entries individually")
 
                 # Update series_number for the newly added entries
                 if added_count > 0:
@@ -352,7 +332,6 @@ class DatabaseService:
                         entry.series_number = series_info.get(entry.isin)
 
                     session.commit()
-                    print("Updated series numbers for added entries")
 
             result = ImportResult(
                 added_count=len(entries_to_add),
@@ -465,7 +444,7 @@ class DatabaseService:
         try:
             for sheet_name, config in sheet_configs.items():
                 try:
-                    print(f"\nProcessing {sheet_name} sheet...")
+                    print(f"Processing {sheet_name} sheet...")
                     distribution_type = config['type']
                     usecols = config['usecols']
 
@@ -494,9 +473,6 @@ class DatabaseService:
                     # Rename columns
                     df.columns = ['Valuation Period-End Date'] + list(isins)
 
-                    print(f"Debug - First few rows of raw data:")
-                    print(df.head())
-
                     if sheet_name == 'Daily':
                         # For Daily, we only have one ISIN column
                         isin = isins[0]
@@ -515,12 +491,9 @@ class DatabaseService:
                     df['Valuation Period-End Date'] = pd.to_datetime(
                         df['Valuation Period-End Date'])
 
-                    print(f"\nDebug - Processed data for {sheet_name}:")
-                    print(f"Total rows: {len(df)}")
+                    # Print concise summary instead of full DataFrame
                     print(
-                        f"Date range: {df['Valuation Period-End Date'].min()} to {df['Valuation Period-End Date'].max()}")
-                    print("Sample of processed data:")
-                    print(df.head())
+                        f"Processed data: {len(df)} rows ({df['Valuation Period-End Date'].min().date()} to {df['Valuation Period-End Date'].max().date()})")
 
                     # Use save_nav_entries to handle the import with the specific distribution type
                     results[sheet_name] = self.save_nav_entries(
@@ -528,7 +501,6 @@ class DatabaseService:
 
                 except Exception as e:
                     print(f"Error processing sheet {sheet_name}: {str(e)}")
-                    print(f"Full error details:", e)
                     results[sheet_name] = ImportResult(
                         added_count=0, duplicates_count=0, invalid_series_count=0)
 

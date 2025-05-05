@@ -12,6 +12,12 @@ class GoogleDriveService:
         """Initialize Google Drive service"""
         self.logger = logging.getLogger(__name__)
 
+        # Disable DEBUG logs from Google API Client
+        logging.getLogger('googleapiclient.discovery').setLevel(
+            logging.WARNING)
+        logging.getLogger('google_auth_httplib2').setLevel(logging.WARNING)
+        logging.getLogger('googleapiclient').setLevel(logging.WARNING)
+
         try:
             # First try to get credentials from environment variable
             creds_json = os.getenv('GOOGLE_DRIVE_CREDENTIALS')
@@ -30,10 +36,8 @@ class GoogleDriveService:
                     "No credentials provided - either set GOOGLE_DRIVE_CREDENTIALS environment variable or provide credentials_path")
 
             self.service = build('drive', 'v3', credentials=credentials)
-            self.logger.info("Google Drive service initialized successfully")
         except Exception as e:
-            self.logger.error(
-                f"Failed to initialize Google Drive service: {str(e)}")
+            self.logger.error(f"Drive service init failed: {str(e)}")
             raise
 
     def _find_file_by_name_in_folder(self, filename: str, folder_id: str) -> Optional[str]:
@@ -52,8 +56,7 @@ class GoogleDriveService:
             return files[0]['id'] if files else None
 
         except Exception as e:
-            self.logger.error(f"Failed to search for file {
-                              filename}: {str(e)}")
+            self.logger.error(f"Search failed for {filename}")
             raise
 
     def upload_file(self, file_path: Path, folder_id: str) -> str:
@@ -72,8 +75,7 @@ class GoogleDriveService:
                     media_body=media,
                     fields='id'
                 ).execute()
-                self.logger.info(f"Successfully updated existing file {
-                                 filename} in Google Drive")
+                # No need to log every successful file update
             else:
                 # Create new file
                 file_metadata = {
@@ -85,12 +87,11 @@ class GoogleDriveService:
                     media_body=media,
                     fields='id'
                 ).execute()
-                self.logger.info(f"Successfully uploaded new file {
-                                 filename} to Google Drive")
+                # Only log new file uploads
+                self.logger.info(f"New file uploaded: {filename}")
 
             return file.get('id')
 
         except Exception as e:
-            self.logger.error(
-                f"Failed to upload/update {file_path.name}: {str(e)}")
+            self.logger.error(f"Upload failed: {file_path.name}")
             raise
