@@ -4,15 +4,17 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from pathlib import Path
 import logging
+from config import SMTPConfig
+from typing import Union, List, Optional
 
 
 class EmailSender:
-    def __init__(self, smtp_config: dict):
+    def __init__(self, smtp_config: Union[dict, SMTPConfig]):
         """
         Initialize EmailSender with SMTP configuration
 
         Args:
-            smtp_config (dict): SMTP configuration containing:
+            smtp_config: SMTP configuration containing:
                 - host: SMTP server hostname
                 - port: SMTP server port
                 - user: SMTP username
@@ -23,18 +25,18 @@ class EmailSender:
         self.logger = logging.getLogger(__name__)
 
     def send_report(self,
-                    to_emails: list,
+                    to_emails: List[str],
                     subject: str,
                     body: str,
-                    attachment_path: Path = None) -> bool:
+                    attachment_path: Optional[Path] = None) -> bool:
         """
         Send email with attachment
 
         Args:
-            to_emails (list): List of recipient email addresses
-            subject (str): Email subject
-            body (str): Email body text
-            attachment_path (Path): Path to the file to attach
+            to_emails: List of recipient email addresses
+            subject: Email subject
+            body: Email body text
+            attachment_path: Path to the file to attach
 
         Returns:
             bool: True if email was sent successfully, False otherwise
@@ -46,7 +48,8 @@ class EmailSender:
 
             # Create message
             msg = MIMEMultipart()
-            msg['From'] = self.smtp_config['user']
+            msg['From'] = self.smtp_config.user if hasattr(
+                self.smtp_config, 'user') else self.smtp_config['user']
             msg['To'] = ', '.join(to_emails)  # Join multiple emails with comma
             msg['Subject'] = subject
 
@@ -64,19 +67,32 @@ class EmailSender:
                     )
                     msg.attach(attachment)
 
+            # Get SMTP parameters, handling both dict and object access
+            if hasattr(self.smtp_config, 'host'):
+                # Object access
+                host = self.smtp_config.host
+                port = self.smtp_config.port
+                user = self.smtp_config.user
+                password = self.smtp_config.password
+                use_tls = self.smtp_config.use_tls
+            else:
+                # Dict access
+                host = self.smtp_config['host']
+                port = self.smtp_config['port']
+                user = self.smtp_config['user']
+                password = self.smtp_config['password']
+                use_tls = self.smtp_config.get('use_tls', True)
+
             # Create SMTP connection
-            with smtplib.SMTP(self.smtp_config['host'], self.smtp_config['port']) as server:
-                if self.smtp_config.get('use_tls', True):
+            with smtplib.SMTP(host, port) as server:
+                if use_tls:
                     server.starttls()
 
-                server.login(
-                    self.smtp_config['user'],
-                    self.smtp_config['password']
-                )
+                server.login(user, password)
 
                 # Send email to all recipients
                 server.sendmail(
-                    self.smtp_config['user'],
+                    user,
                     to_emails,  # Pass the list of recipients directly
                     msg.as_string()
                 )

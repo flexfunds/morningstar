@@ -133,8 +133,10 @@ class Trade(Base):
     currency = Column(String(10))
     settlement_date = Column(Date)
     trade_value = Column(Float)
-    broker = Column(String(100))
-    account = Column(String(100))
+    # Changed to nullable=True to allow null values
+    broker = Column(String(100), nullable=True)
+    # Made nullable with default
+    account = Column(String(100), nullable=True, default="DEFAULT_ACCOUNT")
     source_file = Column(String(255))  # Original file name
     source_folder = Column(String(255))  # ETPCAP2 or HFMX
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

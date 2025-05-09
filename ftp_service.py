@@ -49,17 +49,17 @@ class FTPService:
             ftp.encoding = 'utf-8'
             try:
                 # Connect and authenticate
-                ftp.connect(host=ftp_config['host'], port=21)
+                ftp.connect(host=ftp_config.host, port=21)
                 ftp.auth()
-                ftp.login(ftp_config['user'], ftp_config['password'])
+                ftp.login(ftp_config.user, ftp_config.password)
 
                 # Enable TLS for data channel
                 ftp.prot_p()
                 ftp.set_pasv(True)
 
                 # Change to directory if specified
-                if ftp_config.get('directory'):
-                    ftp.cwd(ftp_config['directory'])
+                if hasattr(ftp_config, 'directory') and ftp_config.directory:
+                    ftp.cwd(ftp_config.directory)
 
                 # Download the file
                 with open(temp_file, 'wb') as f:

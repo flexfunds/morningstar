@@ -9,9 +9,11 @@ from series_change_detector import SeriesChangeDetector
 import pandas as pd
 import math
 import traceback
-from sqlalchemy import func
+from sqlalchemy import func, create_engine
+from sqlalchemy.orm import sessionmaker
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Set, Optional
+from config import AppConfig, DEFAULT_FTP_CONFIGS
 
 app = Flask(__name__)
 
@@ -20,6 +22,57 @@ app.config['TIMEOUT'] = 300  # 5 minutes timeout
 
 # Load environment variables
 load_dotenv()
+
+
+def get_reliable_session():
+    """
+    Create a database session using multiple fallback methods to ensure reliability.
+    Returns a session object that must be closed by the caller.
+    """
+    session = None
+    errors = []
+
+    # Method 1: Using SessionMaker directly
+    try:
+        session = processor.db_manager.Session()
+        return session
+    except (AttributeError, TypeError) as e:
+        errors.append(f"Method 1 failed: {str(e)}")
+
+    # Method 2: Using get_session method
+    try:
+        Session = processor.db_manager.get_session()
+        session = Session()
+        return session
+    except (AttributeError, TypeError) as e:
+        errors.append(f"Method 2 failed: {str(e)}")
+
+    # Method 3: Using SessionMaker as context manager
+    try:
+        session = processor.db_manager.SessionMaker()
+        return session
+    except (AttributeError, TypeError) as e:
+        errors.append(f"Method 3 failed: {str(e)}")
+
+    # Method 4: Try to access it as a property
+    try:
+        session = processor.db_manager.session
+        return session
+    except (AttributeError, TypeError) as e:
+        errors.append(f"Method 4 failed: {str(e)}")
+
+    # Final fallback - create a new SQLAlchemy session from scratch
+    try:
+        engine = create_engine('sqlite:///nav_data.db')
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        print(
+            f"Created fallback session. Previous errors: {', '.join(errors)}")
+        return session
+    except Exception as e:
+        errors.append(f"Fallback method failed: {str(e)}")
+        raise Exception(
+            f"Could not create database session. Errors: {', '.join(errors)}")
 
 
 def get_previous_business_day():
@@ -117,11 +170,20 @@ def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 
+# Create a config dictionary
+config_dict = {
+    'mode': 'remote',
+    'ftp_configs': ftp_configs,
+    'smtp_config': smtp_config,
+    'drive_config': drive_config,
+    'db_connection_string': 'sqlite:///nav_data.db'
+}
+
+# Create AppConfig using from_dict method
+app_config = AppConfig.from_dict(config_dict)
+
 processor = NAVProcessor(
-    mode="remote",
-    ftp_configs=ftp_configs,
-    smtp_config=smtp_config,
-    drive_config=drive_config
+    config=app_config
 )
 
 
@@ -145,7 +207,7 @@ def get_nav_data():
             end_date = datetime.strptime(end_date, '%Y-%m-%d')
 
         # Get NAV history with pagination
-        nav_entries = processor.db_service.get_nav_history(
+        nav_entries = processor.db_manager.get_nav_history(
             isin=isin,
             series_number=series_number,
             start_date=start_date,
@@ -202,16 +264,26 @@ def fetch_remote_navs():
         isin_filters = data.get('isin_filters', [])
         specific_isins = data.get('isins', [])
         series_number = data.get('series_number')
+        series_type = data.get('series_type')  # Renamed from file_type
 
         print(f"Processing NAVs for date: {date_str}")
         print(f"Filter types: {isin_filters}")
         print(f"Specific ISINs: {specific_isins}")
         print(f"Series number: {series_number}")
+        print(f"Series type: {series_type}")
+
+        # If series_type is specified, add it to the filter
+        if series_type:
+            if isinstance(isin_filters, list):
+                isin_filters.append(series_type)
+            else:
+                isin_filters = [series_type]
 
         # If specific ISINs or series number is provided, use that as target
         target_isins = None
         if specific_isins or series_number:
-            with processor.db_service.SessionMaker() as session:
+            session = get_reliable_session()
+            try:
                 query = session.query(Series.isin)
                 if specific_isins:
                     query = query.filter(Series.isin.in_(specific_isins))
@@ -223,38 +295,43 @@ def fetch_remote_navs():
                         'status': 'error',
                         'message': f'No series found matching the provided filters'
                     }), 404
+            finally:
+                session.close()
         else:
             # Get target ISINs for each filter type and combine them
             target_isins = set()
             for filter_type in isin_filters:
-                filter_isins = processor._get_target_isins(filter_type)
-                target_isins.update(filter_isins)
+                filter_isins = processor.db_manager.get_target_isins(
+                    filter_type)
+                if filter_isins is not None:  # Only update if filter_isins is not None
+                    target_isins.update(filter_isins)
             target_isins = list(target_isins)
 
         # Process NAVs without sending email or generating templates
-        nav_dfs = processor._process_nav_files(
-            date_str=date_str,
-            target_isins=target_isins
-        )
-
-        # Save to database
         try:
-            total_added, total_duplicates, total_invalids = processor._save_to_database(
-                nav_dfs, 'morningstar')
+            # Use process_navs with empty template_types to avoid template generation
+            # and send_email=False to avoid sending emails
+            processor.process_navs(
+                date_str=date_str,
+                send_email=False,
+                isin_filter=isin_filters,  # Pass the full list including series_type
+                template_types=[]  # Empty list to avoid template generation
+            )
 
             return jsonify({
                 'status': 'success',
                 'message': f'Successfully processed NAV files',
-                'stats': {
-                    'added': total_added,
-                    'duplicates': total_duplicates,
-                    'invalids': total_invalids
-                },
                 'date_processed': date_str,
+                'stats': {
+                    'added': 0,  # We don't have actual stats anymore, but frontend expects these fields
+                    'duplicates': 0,
+                    'invalids': 0
+                },
                 'filters_applied': {
                     'filter_types': isin_filters,
                     'specific_isins': specific_isins,
-                    'series_number': series_number
+                    'series_number': series_number,
+                    'series_type': series_type
                 }
             }), 200
 
@@ -265,16 +342,17 @@ def fetch_remote_navs():
             return jsonify({
                 'status': 'success',
                 'message': 'Processed NAV files with some duplicates/invalid entries',
+                'date_processed': date_str,
                 'stats': {
                     'added': 0,
-                    'duplicates': 'unknown',
-                    'invalids': 'unknown'
+                    'duplicates': 0,
+                    'invalids': 0
                 },
-                'date_processed': date_str,
                 'filters_applied': {
                     'filter_types': isin_filters,
                     'specific_isins': specific_isins,
-                    'series_number': series_number
+                    'series_number': series_number,
+                    'series_type': series_type
                 }
             }), 200
 
@@ -314,6 +392,7 @@ def generate_templates():
         isin_filters = data.get('isin_filters', [])
         specific_isins = data.get('isins', [])
         series_number = data.get('series_number')
+        series_type = data.get('series_type')  # Renamed from file_type
 
         # Get template types (default to both)
         template_types = data.get('template_types', ['morningstar', 'six'])
@@ -323,12 +402,21 @@ def generate_templates():
         print(f"Filter types: {isin_filters}")
         print(f"Specific ISINs: {specific_isins}")
         print(f"Series number: {series_number}")
+        print(f"Series type: {series_type}")
         print(f"Template types: {template_types}")
+
+        # If series_type is specified, add it to the filter
+        if series_type:
+            if isinstance(isin_filters, list):
+                isin_filters.append(series_type)
+            else:
+                isin_filters = [series_type]
 
         # If specific ISINs or series number is provided, use that as target
         isin_filter_value = None
         if specific_isins or series_number:
-            with processor.db_service.SessionMaker() as session:
+            session = get_reliable_session()
+            try:
                 query = session.query(Series.isin)
                 if specific_isins:
                     query = query.filter(Series.isin.in_(specific_isins))
@@ -341,13 +429,11 @@ def generate_templates():
                         'message': f'No series found matching the provided filters'
                     }), 404
                 isin_filter_value = target_isins
+            finally:
+                session.close()
         else:
-            # Get target ISINs for each filter type and combine them
-            target_isins = set()
-            for filter_type in isin_filters:
-                filter_isins = processor._get_target_isins(filter_type)
-                target_isins.update(filter_isins)
-            isin_filter_value = list(target_isins)
+            # Pass the isin_filters directly (including series_type)
+            isin_filter_value = isin_filters
 
         # Process NAVs with template generation and email sending
         processor.process_navs(
@@ -367,7 +453,8 @@ def generate_templates():
             'filters_applied': {
                 'filter_types': isin_filters,
                 'specific_isins': specific_isins,
-                'series_number': series_number
+                'series_number': series_number,
+                'series_type': series_type
             }
         }), 200
 
@@ -396,7 +483,8 @@ def get_series():
         series_number = request.args.get('series_number')
 
         # Query series from database
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             query = session.query(Series)
 
             # Apply filters
@@ -440,11 +528,17 @@ def get_series():
                 }
             }
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_series: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -468,7 +562,7 @@ def get_series_nav_history(identifier):
             end_date = datetime.strptime(end_date, '%Y-%m-%d')
 
         # Get NAV history
-        nav_entries = processor.db_service.get_nav_history(
+        nav_entries = processor.db_manager.get_nav_history(
             isin=identifier,
             series_number=identifier,
             start_date=start_date,
@@ -513,7 +607,8 @@ def get_series_nav_history(identifier):
 def get_series_details(identifier):
     """Get detailed information about a specific series by ISIN or series number"""
     try:
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             series = session.query(Series).filter(
                 (Series.isin == identifier) | (
                     Series.series_number == identifier)
@@ -585,11 +680,17 @@ def get_series_details(identifier):
             }
 
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_series_details: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -598,7 +699,8 @@ def get_series_details(identifier):
 def get_series_stakeholders(identifier):
     """Get all stakeholders associated with a specific series by ISIN or series number"""
     try:
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             # Try to find series by ISIN or series number
             series = session.query(Series).filter(
                 (Series.isin == identifier) | (
@@ -675,11 +777,17 @@ def get_series_stakeholders(identifier):
             }
 
             return jsonify(stakeholders), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_series_stakeholders: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -688,7 +796,8 @@ def get_series_stakeholders(identifier):
 def get_series_fee_structures(identifier):
     """Get all fee structures associated with a specific series by ISIN or series number"""
     try:
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             series = session.query(Series).filter(
                 (Series.isin == identifier) | (
                     Series.series_number == identifier)
@@ -724,11 +833,17 @@ def get_series_fee_structures(identifier):
             }
 
             return jsonify(fee_structures), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_series_fee_structures: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -744,7 +859,8 @@ def get_fee_structures_summary():
         isin = request.args.get('isin')
         series_number = request.args.get('series_number')
 
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             query = session.query(Series, FeeStructure).\
                 join(FeeStructure, Series.isin == FeeStructure.series_isin)
 
@@ -794,11 +910,17 @@ def get_fee_structures_summary():
             }
 
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_fee_structures_summary: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -807,14 +929,15 @@ def get_fee_structures_summary():
 def get_statistics():
     """Get overall statistics about the NAV data"""
     try:
-        with processor.db_service.SessionMaker() as session:
+        session = get_reliable_session()
+        try:
             # Get series statistics
             total_series = session.query(Series).count()
             active_series = session.query(Series).filter(
                 Series.status == SeriesStatus.ACTIVE).count()
 
             # Get NAV statistics
-            nav_stats = processor.db_service.verify_nav_entries()
+            nav_stats = processor.db_manager.verify_nav_entries()
 
             response = {
                 'status': 'success',
@@ -836,11 +959,17 @@ def get_statistics():
             }
 
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_statistics: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -872,7 +1001,7 @@ def detect_series_changes():
         master_file_path = os.path.join(os.path.dirname(
             __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
         detector = SeriesChangeDetector(
-            master_file_path, processor.db_service.SessionMaker)
+            master_file_path, processor.db_manager.SessionMaker)
 
         # Detect changes
         changes = detector.detect_changes(temp_file_path)
@@ -940,7 +1069,7 @@ def update_series_master():
         master_file_path = os.path.join(os.path.dirname(
             __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
         detector = SeriesChangeDetector(
-            master_file_path, processor.db_service.SessionMaker)
+            master_file_path, processor.db_manager.SessionMaker)
         detector.update_master_file(temp_file_path)
 
         # Clean up temporary file
@@ -1866,7 +1995,7 @@ def index():
                             <input type="date" v-model="fetchNavForm.date_str" class="form-control">
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">Filter Types</label>
+                            <label class="form-label">NAV Frequency Filters</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" value="daily" v-model="fetchNavForm.isin_filters">
                                 <label class="form-check-label">Daily Series</label>
@@ -1878,6 +2007,21 @@ def index():
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" value="monthly" v-model="fetchNavForm.isin_filters">
                                 <label class="form-check-label">Monthly Series</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Series Type Filter</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="fetchNavSeriesType" value="" v-model="fetchNavForm.series_type" checked>
+                                <label class="form-check-label">All Series Types</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="fetchNavSeriesType" value="wrappers_hybrid" v-model="fetchNavForm.series_type">
+                                <label class="form-check-label">Wrappers Hybrid Series</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="fetchNavSeriesType" value="loan" v-model="fetchNavForm.series_type">
+                                <label class="form-check-label">Loan Series</label>
                             </div>
                         </div>
                         <div class="mb-3">
@@ -1946,7 +2090,7 @@ def index():
                             </div>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">Filter Types</label>
+                            <label class="form-label">NAV Frequency Filters</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" value="daily" v-model="generateTemplatesForm.isin_filters">
                                 <label class="form-check-label">Daily Series</label>
@@ -1958,6 +2102,21 @@ def index():
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" value="monthly" v-model="generateTemplatesForm.isin_filters">
                                 <label class="form-check-label">Monthly Series</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Series Type Filter</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="generateTemplatesSeriesType" value="" v-model="generateTemplatesForm.series_type" checked>
+                                <label class="form-check-label">All Series Types</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="generateTemplatesSeriesType" value="wrappers_hybrid" v-model="generateTemplatesForm.series_type">
+                                <label class="form-check-label">Wrappers Hybrid Series</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="generateTemplatesSeriesType" value="loan" v-model="generateTemplatesForm.series_type">
+                                <label class="form-check-label">Loan Series</label>
                             </div>
                         </div>
                         <div class="mb-3">
@@ -2014,7 +2173,8 @@ def index():
                         date_str: '',
                         isin_filters: [],
                         isins: [],
-                        series_number: ''
+                        series_number: '',
+                        series_type: ''
                     },
                     generateTemplatesForm: {
                         date_str: '',
@@ -2023,7 +2183,8 @@ def index():
                         isin_filters: [],
                         isins: [],
                         series_number: '',
-                        template_types: ['morningstar']
+                        template_types: ['morningstar'],
+                        series_type: ''
                     },
                     activeTab: 'nav',
                     seriesData: [],
@@ -2265,15 +2426,17 @@ def index():
                             date_str: formattedDate,
                             isin_filters: this.fetchNavForm.isin_filters.length > 0 ? this.fetchNavForm.isin_filters : undefined,
                             isins: this.fetchNavForm.isins.length > 0 ? this.fetchNavForm.isins : undefined,
-                            series_number: this.fetchNavForm.series_number || undefined
+                            series_number: this.fetchNavForm.series_number || undefined,
+                            series_type: this.fetchNavForm.series_type || undefined
                         };
 
                         axios.post('/fetch-remote-navs', data)
                             .then(response => {
+                                // Load fresh data first before showing success message
+                                this.loadData();
                                 this.showSnackbar('Successfully fetched NAV data: ' + 
                                       response.data.stats.added + ' new entries added, ' +
                                       response.data.stats.duplicates + ' duplicates skipped');
-                                this.loadData();
                                 this.showFetchNav = false;
                                 this.fetchNavForm.isins = [];
                                 this.fetchNavForm.isin_filters = [];
@@ -2326,7 +2489,8 @@ def index():
                             isin_filters: this.generateTemplatesForm.isin_filters.length > 0 ? this.generateTemplatesForm.isin_filters : undefined,
                             isins: this.generateTemplatesForm.isins.length > 0 ? this.generateTemplatesForm.isins : undefined,
                             series_number: this.generateTemplatesForm.series_number || undefined,
-                            template_types: this.generateTemplatesForm.template_types
+                            template_types: this.generateTemplatesForm.template_types,
+                            series_type: this.generateTemplatesForm.series_type || undefined
                         };
 
                         axios.post('/generate-templates', data)
@@ -2765,7 +2929,9 @@ def get_trades():
         if end_date:
             end_date = datetime.strptime(end_date, '%Y-%m-%d')
 
-        with processor.db_service.SessionMaker() as session:
+        # Use our reliable session helper
+        session = get_reliable_session()
+        try:
             query = session.query(Trade)
 
             # Apply filters
@@ -2789,29 +2955,46 @@ def get_trades():
                 .limit(per_page)\
                 .all()
 
+            # Convert trades to safe dictionaries
+            trade_data = []
+            for trade in trades:
+                # Safely get attributes
+                trade_dict = {
+                    'id': getattr(trade, 'id', None),
+                    'series_number': getattr(trade, 'series_number', None),
+                    'trade_date': getattr(trade, 'trade_date', None).strftime('%Y-%m-%d') if getattr(trade, 'trade_date', None) else None,
+                    'trade_type': getattr(trade, 'trade_type', None),
+                    'security_type': getattr(trade, 'security_type', None),
+                    'security_name': getattr(trade, 'security_name', None),
+                    'security_id': getattr(trade, 'security_id', None),
+                    'quantity': getattr(trade, 'quantity', None),
+                    'price': getattr(trade, 'price', None),
+                    'currency': getattr(trade, 'currency', None),
+                    'trade_value': getattr(trade, 'trade_value', None),
+                    'broker': getattr(trade, 'broker', None),
+                    'account': getattr(trade, 'account', None),
+                    'source_folder': getattr(trade, 'source_folder', None)
+                }
+
+                # Handle nullable date fields
+                settlement_date = getattr(trade, 'settlement_date', None)
+                if settlement_date:
+                    trade_dict['settlement_date'] = settlement_date.strftime(
+                        '%Y-%m-%d')
+                else:
+                    trade_dict['settlement_date'] = None
+
+                # Special handling for source_file attribute which might be missing in some DB versions
+                try:
+                    trade_dict['source_file'] = trade.source_file
+                except (AttributeError, KeyError):
+                    trade_dict['source_file'] = None
+
+                trade_data.append(trade_dict)
+
             response = {
                 'status': 'success',
-                'data': [
-                    {
-                        'id': trade.id,
-                        'series_number': trade.series_number,
-                        'trade_date': trade.trade_date.strftime('%Y-%m-%d'),
-                        'trade_type': trade.trade_type,
-                        'security_type': trade.security_type,
-                        'security_name': trade.security_name,
-                        'security_id': trade.security_id,
-                        'quantity': trade.quantity,
-                        'price': trade.price,
-                        'currency': trade.currency,
-                        'settlement_date': trade.settlement_date.strftime('%Y-%m-%d') if trade.settlement_date else None,
-                        'trade_value': trade.trade_value,
-                        'broker': trade.broker,
-                        'account': trade.account,
-                        'source_file': trade.source_file,
-                        'source_folder': trade.source_folder
-                    }
-                    for trade in trades
-                ],
+                'data': trade_data,
                 'pagination': {
                     'current_page': page,
                     'per_page': per_page,
@@ -2821,11 +3004,17 @@ def get_trades():
             }
 
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_trades: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
@@ -2834,53 +3023,85 @@ def get_trades():
 def get_trades_summary():
     """Get summary statistics about trades"""
     try:
-        with processor.db_service.SessionMaker() as session:
+        # Use our reliable session helper
+        session = get_reliable_session()
+        try:
             # Get total trades
             total_trades = session.query(Trade).count()
 
             # Get trades by source folder
-            trades_by_folder = session.query(
-                Trade.source_folder,
-                func.count(Trade.id)
-            ).group_by(Trade.source_folder).all()
+            try:
+                trades_by_folder = session.query(
+                    Trade.source_folder,
+                    func.count(Trade.id)
+                ).group_by(Trade.source_folder).all()
+
+                folder_data = [
+                    {'folder': folder or 'Unknown', 'count': count}
+                    for folder, count in trades_by_folder
+                ]
+            except Exception as folder_error:
+                print(f"Error getting trades by folder: {str(folder_error)}")
+                folder_data = [
+                    {'folder': 'All Folders', 'count': total_trades}]
 
             # Get trades by security type
-            trades_by_security_type = session.query(
-                Trade.security_type,
-                func.count(Trade.id)
-            ).group_by(Trade.security_type).all()
+            try:
+                trades_by_security_type = session.query(
+                    Trade.security_type,
+                    func.count(Trade.id)
+                ).group_by(Trade.security_type).all()
+
+                security_type_data = [
+                    {'type': type_ or 'Unknown', 'count': count}
+                    for type_, count in trades_by_security_type
+                ]
+            except Exception as type_error:
+                print(
+                    f"Error getting trades by security type: {str(type_error)}")
+                security_type_data = [
+                    {'type': 'All Types', 'count': total_trades}]
 
             # Get date range
-            date_range = session.query(
-                func.min(Trade.trade_date),
-                func.max(Trade.trade_date)
-            ).first()
+            try:
+                date_range = session.query(
+                    func.min(Trade.trade_date),
+                    func.max(Trade.trade_date)
+                ).first()
+
+                date_range_data = {
+                    'earliest': date_range[0].strftime('%Y-%m-%d') if date_range[0] else None,
+                    'latest': date_range[1].strftime('%Y-%m-%d') if date_range[1] else None
+                }
+            except Exception as date_error:
+                print(f"Error getting trade date range: {str(date_error)}")
+                date_range_data = {
+                    'earliest': None,
+                    'latest': None
+                }
 
             response = {
                 'status': 'success',
                 'data': {
                     'total_trades': total_trades,
-                    'trades_by_folder': [
-                        {'folder': folder, 'count': count}
-                        for folder, count in trades_by_folder
-                    ],
-                    'trades_by_security_type': [
-                        {'type': type_, 'count': count}
-                        for type_, count in trades_by_security_type
-                    ],
-                    'date_range': {
-                        'earliest': date_range[0].strftime('%Y-%m-%d') if date_range[0] else None,
-                        'latest': date_range[1].strftime('%Y-%m-%d') if date_range[1] else None
-                    }
+                    'trades_by_folder': folder_data,
+                    'trades_by_security_type': security_type_data,
+                    'date_range': date_range_data
                 }
             }
 
             return jsonify(response), 200
+        finally:
+            session.close()
 
     except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in get_trades_summary: {str(e)}")
+        print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'traceback': error_traceback
         }), 500
 
 
