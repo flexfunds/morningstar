@@ -32,34 +32,19 @@ def get_reliable_session():
     session = None
     errors = []
 
-    # Method 1: Using SessionMaker directly
+    # Method 1: Using db_service.SessionMaker (correct way)
     try:
-        session = processor.db_manager.Session()
+        session = processor.db_manager.db_service.SessionMaker()
         return session
     except (AttributeError, TypeError) as e:
         errors.append(f"Method 1 failed: {str(e)}")
 
-    # Method 2: Using get_session method
+    # Method 2: Using db_service as direct session provider
     try:
-        Session = processor.db_manager.get_session()
-        session = Session()
+        session = processor.db_manager.db_service.get_session()
         return session
     except (AttributeError, TypeError) as e:
         errors.append(f"Method 2 failed: {str(e)}")
-
-    # Method 3: Using SessionMaker as context manager
-    try:
-        session = processor.db_manager.SessionMaker()
-        return session
-    except (AttributeError, TypeError) as e:
-        errors.append(f"Method 3 failed: {str(e)}")
-
-    # Method 4: Try to access it as a property
-    try:
-        session = processor.db_manager.session
-        return session
-    except (AttributeError, TypeError) as e:
-        errors.append(f"Method 4 failed: {str(e)}")
 
     # Final fallback - create a new SQLAlchemy session from scratch
     try:
@@ -997,11 +982,16 @@ def detect_series_changes():
         temp_file_path = os.path.join(temp_dir, file.filename)
         file.save(temp_file_path)
 
-        # Initialize change detector with master file and session maker
+        # Initialize change detector with master file and session provider
         master_file_path = os.path.join(os.path.dirname(
             __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
+
+        # Create a session provider function that returns a new session
+        def session_provider():
+            return get_reliable_session()
+
         detector = SeriesChangeDetector(
-            master_file_path, processor.db_manager.SessionMaker)
+            master_file_path, session_provider)
 
         # Detect changes
         changes = detector.detect_changes(temp_file_path)
@@ -1068,8 +1058,14 @@ def update_series_master():
         # Initialize change detector and update master file
         master_file_path = os.path.join(os.path.dirname(
             __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
+
+        # Create a session provider function that returns a new session
+        def session_provider():
+            return get_reliable_session()
+
         detector = SeriesChangeDetector(
-            master_file_path, processor.db_manager.SessionMaker)
+            master_file_path, session_provider)
+
         detector.update_master_file(temp_file_path)
 
         # Clean up temporary file
@@ -1754,6 +1750,15 @@ def index():
                                 </div>
                                 <small class="text-muted">Upload a new Series Qualitative Data file to detect changes</small>
                             </div>
+                            <div class="col-md-6">
+                                <h6>Import from Google Drive</h6>
+                                <div class="input-group">
+                                    <button class="btn btn-success" @click="importFromGoogleDrive">
+                                        Import Latest Master File
+                                    </button>
+                                </div>
+                                <small class="text-muted">Import the most recent Series Qualitative Data file from Google Drive</small>
+                            </div>
                         </div>
 
                         <!-- Change Detection Results -->
@@ -1821,13 +1826,13 @@ def index():
                                 </div>
                             </div>
 
-                            <!-- Update Master File Button -->
-                            <div class="mt-4">
-                                <button class="btn btn-success" @click="updateMasterFile" :disabled="!selectedFile">
-                                    Update Master File
+                            <!-- Combined Update Button -->
+                            <div class="mt-4" v-if="changeResults">
+                                <button class="btn btn-success" @click="applyChanges">
+                                    Apply Changes
                                 </button>
                                 <small class="text-muted ms-2">
-                                    This will update the master file with the new changes. A backup will be created automatically.
+                                    This will update the master file with the detected changes. A backup will be created automatically.
                                 </small>
                             </div>
                         </div>
@@ -2252,7 +2257,8 @@ def index():
                         startDate: '',
                         endDate: '',
                         security_type: ''
-                    }
+                    },
+                    tempFilePath: null,
                 },
                 computed: {
                     // Calculate which middle pages to show
@@ -2692,35 +2698,62 @@ def index():
                             this.showSnackbar('Error detecting changes: ' + (error.response?.data?.message || error.message), 'error');
                         });
                     },
-                    updateMasterFile() {
-                        if (!this.selectedFile) return;
+                    applyChanges() {
+                        if (!this.changeResults) return;
 
-                        if (!confirm('Are you sure you want to update the master file? A backup will be created automatically.')) {
+                        if (!confirm('Are you sure you want to apply these changes? A backup will be created automatically.')) {
                             return;
                         }
 
-                        const formData = new FormData();
-                        formData.append('file', this.selectedFile);
+                        // If we have a tempFilePath, use the confirm-update endpoint for Google Drive imports
+                        if (this.tempFilePath) {
+                            axios.post('/series-qualitative/confirm-update', {
+                                file_path: this.tempFilePath
+                            })
+                            .then(response => {
+                                if (response.data.status === 'success') {
+                                    this.showSnackbar('Changes applied successfully');
+                                    this.tempFilePath = null;
+                                    this.changeResults = null;
+                                } else {
+                                    this.showSnackbar(response.data.message, 'error');
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error applying changes:', error);
+                                this.showSnackbar('Error applying changes: ' + 
+                                    (error.response?.data?.message || error.message), 'error');
+                            });
+                        } 
+                        // Otherwise, use the update endpoint for manually uploaded files
+                        else if (this.selectedFile) {
+                            const formData = new FormData();
+                            formData.append('file', this.selectedFile);
 
-                        axios.post('/series-qualitative/update', formData, {
-                            headers: {
-                                'Content-Type': 'multipart/form-data'
-                            }
-                        })
-                        .then(response => {
-                            if (response.data.status === 'success') {
-                                this.showSnackbar('Master file updated successfully');
-                                this.selectedFile = null;
-                                this.changeResults = null;
-                                this.$refs.fileInput.value = '';
-                            } else {
-                                this.showSnackbar(response.data.message, 'error');
-                            }
-                        })
-                        .catch(error => {
-                            console.error('Error updating master file:', error);
-                            this.showSnackbar('Error updating master file: ' + (error.response?.data?.message || error.message), 'error');
-                        });
+                            axios.post('/series-qualitative/update', formData, {
+                                headers: {
+                                    'Content-Type': 'multipart/form-data'
+                                }
+                            })
+                            .then(response => {
+                                if (response.data.status === 'success') {
+                                    this.showSnackbar('Changes applied successfully');
+                                    this.selectedFile = null;
+                                    this.changeResults = null;
+                                    this.$refs.fileInput.value = '';
+                                } else {
+                                    this.showSnackbar(response.data.message, 'error');
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error applying changes:', error);
+                                this.showSnackbar('Error applying changes: ' + 
+                                    (error.response?.data?.message || error.message), 'error');
+                            });
+                        }
+                        else {
+                            this.showSnackbar('No file to apply changes from', 'error');
+                        }
                     },
                     getChangesByType(type) {
                         if (!this.changeResults) return [];
@@ -2820,6 +2853,74 @@ def index():
                             minimumFractionDigits: 2,
                             maximumFractionDigits: 2
                         }).format(value);
+                    },
+                    importFromGoogleDrive() {
+                        if (!confirm('Are you sure you want to import the latest Series Qualitative Data file from Google Drive? A backup of the current master file will be created automatically.')) {
+                            return;
+                        }
+                        
+                        axios.post('/series-qualitative/import-from-drive', {})
+                        .then(response => {
+                            if (response.data.status === 'changes_detected') {
+                                // Set the change results to display them
+                                this.changeResults = response.data.changes;
+                                
+                                // Store the temporary file path for later confirmation
+                                this.tempFilePath = response.data.file_path;
+                                
+                                this.showSnackbar('Changes detected from Google Drive. Please review and confirm.', 'success');
+                            } else if (response.data.status === 'success') {
+                                this.showSnackbar(response.data.message, 'success');
+                                // Clear the file input and change results
+                                this.selectedFile = null;
+                                this.changeResults = null;
+                                if (this.$refs.fileInput) {
+                                    this.$refs.fileInput.value = '';
+                                }
+                            } else {
+                                this.showSnackbar(response.data.message, 'error');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error importing from Google Drive:', error);
+                            this.showSnackbar(
+                                'Error importing from Google Drive: ' + 
+                                (error.response?.data?.message || error.message), 
+                                'error'
+                            );
+                        });
+                    },
+                    confirmGoogleDriveUpdate() {
+                        if (!this.tempFilePath) {
+                            this.showSnackbar('No file to confirm', 'error');
+                            return;
+                        }
+                        
+                        if (!confirm('Are you sure you want to update the master file with these changes?')) {
+                            return;
+                        }
+                        
+                        axios.post('/series-qualitative/confirm-update', {
+                            file_path: this.tempFilePath
+                        })
+                        .then(response => {
+                            if (response.data.status === 'success') {
+                                this.showSnackbar('Master file updated successfully', 'success');
+                                // Clear the temp file path and change results
+                                this.tempFilePath = null;
+                                this.changeResults = null;
+                            } else {
+                                this.showSnackbar(response.data.message, 'error');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error confirming update:', error);
+                            this.showSnackbar(
+                                'Error confirming update: ' + 
+                                (error.response?.data?.message || error.message), 
+                                'error'
+                            );
+                        });
                     },
                 },
                 mounted() {
@@ -3097,6 +3198,129 @@ def get_trades_summary():
     except Exception as e:
         error_traceback = traceback.format_exc()
         print(f"Error in get_trades_summary: {str(e)}")
+        print(f"Traceback: {error_traceback}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'traceback': error_traceback
+        }), 500
+
+
+@app.route('/series-qualitative/import-from-drive', methods=['POST'])
+@require_api_key
+def import_series_qualitative_from_drive():
+    """Import the most recent Series Qualitative Data file from Google Drive"""
+    try:
+        data = request.get_json() or {}
+
+        # Hard code the Google Drive folder ID
+        folder_id = '1DVlLOzaKQJytWf1IaE0QQy1mQfFjPmCY'
+
+        # Get specific file ID if provided
+        file_id = data.get('file_id')
+
+        # Initialize change detector with a function to get a session rather than SessionMaker
+        master_file_path = os.path.join(os.path.dirname(
+            __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
+
+        # Create a session provider function that returns a new session
+        def session_provider():
+            return get_reliable_session()
+
+        detector = SeriesChangeDetector(
+            master_file_path, session_provider)
+
+        # Get credentials path from environment or drive_config
+        credentials_path = drive_config.get(
+            'credentials_path') or os.getenv('GOOGLE_DRIVE_CREDENTIALS_PATH')
+
+        if not credentials_path:
+            return jsonify({
+                'status': 'error',
+                'message': 'Google Drive credentials not configured'
+            }), 500
+
+        # Import from Google Drive
+        result = detector.import_from_google_drive(
+            credentials_path=credentials_path,
+            folder_id=folder_id,
+            file_id=file_id,
+            backup=True  # Always create a backup
+        )
+
+        # Based on the new flow, we expect a 'changes_detected' status instead of 'success'
+        if result['status'] == 'changes_detected':
+            # Return the changes for review - this will be shown in the UI
+            response = {
+                'status': 'changes_detected',
+                'message': result['message'],
+                'changes': result.get('changes', []),
+                'change_report': result.get('change_report', ''),
+                'file_path': result.get('file_path', ''),
+                'file_name': result.get('file_name', '')
+            }
+            return jsonify(response), 200
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in import_series_qualitative_from_drive: {str(e)}")
+        print(f"Traceback: {error_traceback}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'traceback': error_traceback
+        }), 500
+
+
+@app.route('/series-qualitative/confirm-update', methods=['POST'])
+@require_api_key
+def confirm_series_qualitative_update():
+    """Confirm the update after reviewing changes from a Google Drive import"""
+    try:
+        data = request.get_json() or {}
+
+        # Get the temporary file path from the request
+        temp_file_path = data.get('file_path')
+
+        if not temp_file_path:
+            return jsonify({
+                'status': 'error',
+                'message': 'No file path provided. Please provide the temporary file path.'
+            }), 400
+
+        if not os.path.exists(temp_file_path):
+            return jsonify({
+                'status': 'error',
+                'message': f'Temporary file not found: {temp_file_path}'
+            }), 404
+
+        # Initialize change detector
+        master_file_path = os.path.join(os.path.dirname(
+            __file__), 'input', 'template', 'Series Qualitative Data.xlsx')
+
+        # Create a session provider function that returns a new session
+        def session_provider():
+            return get_reliable_session()
+
+        detector = SeriesChangeDetector(
+            master_file_path, session_provider)
+
+        # Confirm the update
+        result = detector.confirm_update(
+            temp_file_path=temp_file_path,
+            backup=True  # Always create a backup
+        )
+
+        if result['status'] == 'success':
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in confirm_series_qualitative_update: {str(e)}")
         print(f"Traceback: {error_traceback}")
         return jsonify({
             'status': 'error',

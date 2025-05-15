@@ -7,6 +7,8 @@ from models import Series, SeriesStatus, NAVFrequency, Custodian, FeeStructure
 from sqlalchemy.orm import Session
 from import_data import parse_date, parse_float
 import glob
+import tempfile
+from google_drive_service import GoogleDriveService
 
 
 @dataclass
@@ -18,6 +20,13 @@ class SeriesChange:
     new_value: Any
     series_number: str = None
     nav_frequency: str = None  # Add NAV frequency field
+
+    def __post_init__(self):
+        # Convert pandas NaT values to None to avoid serialization issues
+        if pd.isna(self.old_value):
+            self.old_value = None
+        if pd.isna(self.new_value):
+            self.new_value = None
 
 
 class SeriesChangeDetector:
@@ -59,6 +68,106 @@ class SeriesChangeDetector:
 
         self.master_data.set_index('ISIN', inplace=True)
 
+    def import_from_google_drive(self, credentials_path: str, folder_id: str = None, file_id: str = None, backup: bool = True) -> dict:
+        """
+        Import the master file from Google Drive.
+
+        Args:
+            credentials_path (str): Path to Google Drive credentials file
+            folder_id (str, optional): Google Drive folder ID to look for the most recent file
+            file_id (str, optional): Specific Google Drive file ID to import
+            backup (bool): Whether to create a backup of the current master file
+
+        Returns:
+            dict: Status and message with detected changes
+        """
+        if not folder_id and not file_id:
+            return {
+                'status': 'error',
+                'message': 'Either folder_id or file_id must be provided'
+            }
+
+        try:
+            # Initialize Google Drive service
+            drive_service = GoogleDriveService(credentials_path)
+
+            # If file_id is not provided, get the most recent file from the folder
+            if not file_id and folder_id:
+                file_info = drive_service.get_most_recent_file(
+                    folder_id, "Series Qualitative Data")
+
+                if not file_info:
+                    return {
+                        'status': 'error',
+                        'message': 'No Series Qualitative Data files found in the specified folder'
+                    }
+                file_id = file_info['id']
+                file_name = file_info['name']
+            else:
+                # Get file metadata to get the name
+                file_info = drive_service.service.files().get(
+                    fileId=file_id, fields='name').execute()
+                file_name = file_info.get('name', 'Unknown')
+
+            # Create a temporary file to download to
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+                temp_path = temp_file.name
+
+            # Download the file from Google Drive
+            if not drive_service.download_file(file_id, temp_path):
+                return {
+                    'status': 'error',
+                    'message': f"Failed to download file from Google Drive"
+                }
+
+            # Validate file structure
+            try:
+                temp_data = pd.read_excel(temp_path)
+                required_columns = ['ISIN', 'Series Number', 'NAV Frequency']
+                missing_columns = [
+                    col for col in required_columns if col not in temp_data.columns]
+                if missing_columns:
+                    os.unlink(temp_path)  # Delete the temp file
+                    return {
+                        'status': 'error',
+                        'message': f"Invalid file format. Missing required columns: {', '.join(missing_columns)}"
+                    }
+            except Exception as e:
+                os.unlink(temp_path)  # Delete the temp file
+                return {
+                    'status': 'error',
+                    'message': f"Failed to validate file: {str(e)}"
+                }
+
+            # First, detect changes
+            try:
+                changes = self.detect_changes(temp_path)
+                change_report = self.generate_change_report(changes)
+            except Exception as e:
+                os.unlink(temp_path)
+                return {
+                    'status': 'error',
+                    'message': f"Failed to detect changes: {str(e)}"
+                }
+
+            # Return the detected changes without updating yet
+            # This way the UI can show the changes and ask for confirmation before updating
+            return {
+                'status': 'changes_detected',
+                'message': 'Changes detected. Please review and confirm.',
+                'file_path': temp_path,
+                'file_name': file_name,
+                'changes': changes,
+                'change_report': change_report
+            }
+
+        except Exception as e:
+            import traceback
+            return {
+                'status': 'error',
+                'message': f"Failed to import from Google Drive: {str(e)}"
+            }
+
     def _get_safe_value(self, df: pd.DataFrame, isin: str, column: str) -> str:
         """Safely get a value from a dataframe, handling missing values and NaN"""
         try:
@@ -77,78 +186,162 @@ class SeriesChangeDetector:
         Returns:
             List[SeriesChange]: List of detected changes
         """
-        new_data = pd.read_excel(new_file_path)
+        try:
+            new_data = pd.read_excel(new_file_path)
 
-        # Ensure required columns exist in new file
-        required_columns = ['ISIN', 'Series Number', 'NAV Frequency']
-        missing_columns = [
-            col for col in required_columns if col not in new_data.columns]
-        if missing_columns:
-            raise ValueError(
-                f"Missing required columns in new file: {', '.join(missing_columns)}")
+            # Ensure required columns exist in new file
+            required_columns = ['ISIN', 'Series Number', 'NAV Frequency']
+            missing_columns = [
+                col for col in required_columns if col not in new_data.columns]
+            if missing_columns:
+                raise ValueError(
+                    f"Missing required columns in new file: {', '.join(missing_columns)}")
 
-        new_data.set_index('ISIN', inplace=True)
+            # Drop rows with NaN ISIN values as they can't be properly processed
+            new_data = new_data.dropna(subset=['ISIN'])
 
-        changes: List[SeriesChange] = []
+            # Create a copy of the master data with only valid ISINs for comparison
+            valid_master = self.master_data.copy()
+            if isinstance(valid_master.index, pd.Index):
+                # Make sure we only have valid indexes
+                valid_master = valid_master[valid_master.index.notna()]
 
-        # Detect new series
-        new_isins = set(new_data.index) - set(self.master_data.index)
-        for isin in new_isins:
-            changes.append(SeriesChange(
-                isin=isin,
-                change_type='NEW_SERIES',
-                field_name='',
-                old_value=None,
-                new_value=None,
-                series_number=self._get_safe_value(
-                    new_data, isin, 'Series Number'),
-                nav_frequency=self._get_safe_value(
-                    new_data, isin, 'NAV Frequency')
-            ))
+            # Set index safely
+            new_data.set_index('ISIN', inplace=True)
 
-        # Detect removed series
-        removed_isins = set(self.master_data.index) - set(new_data.index)
-        for isin in removed_isins:
-            changes.append(SeriesChange(
-                isin=isin,
-                change_type='REMOVED_SERIES',
-                field_name='',
-                old_value=None,
-                new_value=None,
-                series_number=self._get_safe_value(
-                    self.master_data, isin, 'Series Number'),
-                nav_frequency=self._get_safe_value(
-                    self.master_data, isin, 'NAV Frequency')
-            ))
+            changes: List[SeriesChange] = []
 
-        # Detect changes in existing series
-        common_isins = set(new_data.index) & set(self.master_data.index)
-        for isin in common_isins:
-            for field in self.IMPORTANT_FIELDS:
-                if field == 'ISIN':
-                    continue
+            # Detect new series
+            new_isins = set(new_data.index) - set(valid_master.index)
+            for isin in new_isins:
+                changes.append(SeriesChange(
+                    isin=isin,
+                    change_type='NEW_SERIES',
+                    field_name='',
+                    old_value=None,
+                    new_value=None,
+                    series_number=self._get_safe_value(
+                        new_data, isin, 'Series Number'),
+                    nav_frequency=self._get_safe_value(
+                        new_data, isin, 'NAV Frequency')
+                ))
 
-                old_value = self.master_data.loc[isin, field]
-                new_value = new_data.loc[isin, field]
+            # Detect removed series
+            removed_isins = set(valid_master.index) - set(new_data.index)
+            for isin in removed_isins:
+                changes.append(SeriesChange(
+                    isin=isin,
+                    change_type='REMOVED_SERIES',
+                    field_name='',
+                    old_value=None,
+                    new_value=None,
+                    series_number=self._get_safe_value(
+                        valid_master, isin, 'Series Number'),
+                    nav_frequency=self._get_safe_value(
+                        valid_master, isin, 'NAV Frequency')
+                ))
 
-                # Handle NaN comparisons
-                if pd.isna(old_value) and pd.isna(new_value):
-                    continue
+            # Detect changes in existing series
+            common_isins = set(new_data.index) & set(valid_master.index)
+            for isin in common_isins:
+                for field in self.IMPORTANT_FIELDS:
+                    try:
+                        if field == 'ISIN':
+                            continue
 
-                if pd.isna(old_value) != pd.isna(new_value) or old_value != new_value:
-                    changes.append(SeriesChange(
-                        isin=isin,
-                        change_type='FIELD_UPDATE',
-                        field_name=field,
-                        old_value=old_value,
-                        new_value=new_value,
-                        series_number=self._get_safe_value(
-                            new_data, isin, 'Series Number'),
-                        nav_frequency=self._get_safe_value(
-                            new_data, isin, 'NAV Frequency')
-                    ))
+                        # Check if the field exists in both dataframes
+                        if field not in valid_master.columns:
+                            # Field only exists in new data, treat as new field
+                            if field in new_data.columns and not pd.isna(new_data.loc[isin, field]):
+                                changes.append(SeriesChange(
+                                    isin=isin,
+                                    change_type='FIELD_UPDATE',
+                                    field_name=field,
+                                    old_value=None,
+                                    new_value=new_data.loc[isin, field],
+                                    series_number=self._get_safe_value(
+                                        new_data, isin, 'Series Number'),
+                                    nav_frequency=self._get_safe_value(
+                                        new_data, isin, 'NAV Frequency')
+                                ))
+                            continue
 
-        return changes
+                        if field not in new_data.columns:
+                            # Field only exists in master data, treat as removed field
+                            if not pd.isna(valid_master.loc[isin, field]):
+                                changes.append(SeriesChange(
+                                    isin=isin,
+                                    change_type='FIELD_UPDATE',
+                                    field_name=field,
+                                    old_value=valid_master.loc[isin, field],
+                                    new_value=None,
+                                    series_number=self._get_safe_value(
+                                        new_data, isin, 'Series Number'),
+                                    nav_frequency=self._get_safe_value(
+                                        new_data, isin, 'NAV Frequency')
+                                ))
+                            continue
+
+                        # Safe extraction of values
+                        try:
+                            old_value = valid_master.loc[isin, field]
+                        except:
+                            old_value = None
+
+                        try:
+                            new_value = new_data.loc[isin, field]
+                        except:
+                            new_value = None
+
+                        # Handle NaN comparisons
+                        if pd.isna(old_value) and pd.isna(new_value):
+                            continue
+
+                        # Simplified comparison approach with explicit handling
+                        is_different = False
+
+                        # Case 1: One is NaN, the other isn't
+                        if pd.isna(old_value) != pd.isna(new_value):
+                            is_different = True
+                        # Case 2: Both are non-NaN values that can be compared
+                        elif not pd.isna(old_value) and not pd.isna(new_value):
+                            # Convert to plain Python types if possible for safer comparison
+                            try:
+                                if isinstance(old_value, pd.Series):
+                                    old_value = old_value.iloc[0] if not old_value.empty else None
+                                if isinstance(new_value, pd.Series):
+                                    new_value = new_value.iloc[0] if not new_value.empty else None
+
+                                is_different = old_value != new_value
+                            except:
+                                # If comparison fails, consider them different
+                                is_different = True
+
+                        if is_different:
+                            changes.append(SeriesChange(
+                                isin=isin,
+                                change_type='FIELD_UPDATE',
+                                field_name=field,
+                                old_value=old_value,
+                                new_value=new_value,
+                                series_number=self._get_safe_value(
+                                    new_data, isin, 'Series Number'),
+                                nav_frequency=self._get_safe_value(
+                                    new_data, isin, 'NAV Frequency')
+                            ))
+                    except Exception as field_error:
+                        print(
+                            f"Warning: Error processing field '{field}' for ISIN '{isin}': {str(field_error)}")
+                        # Continue to next field despite error
+                        continue
+
+            return changes
+
+        except Exception as e:
+            print(f"Error in detect_changes: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            raise
 
     def generate_change_report(self, changes: List[SeriesChange]) -> str:
         """
@@ -270,6 +463,10 @@ class SeriesChangeDetector:
 
         # Process each row
         for idx, row in df.iterrows():
+            # Skip rows with missing ISIN
+            if pd.isna(row.get('ISIN')):
+                continue
+
             # Check if series exists
             series = session.query(Series).filter(
                 Series.isin == row['ISIN']).first()
@@ -453,8 +650,53 @@ class SeriesChangeDetector:
 
         # Sync with database if session maker is available
         if self.session_maker:
-            with self.session_maker() as session:
-                self._sync_with_database(new_data, session)
+            try:
+                # Handle different session provider types
+                if callable(self.session_maker):
+                    # If it's a function that returns a session
+                    session = self.session_maker()
+                    try:
+                        self._sync_with_database(new_data, session)
+                    finally:
+                        if hasattr(session, 'close'):
+                            session.close()
+                else:
+                    # If it's a SessionMaker class (original behavior)
+                    with self.session_maker() as session:
+                        self._sync_with_database(new_data, session)
+            except Exception as e:
+                print(f"Error syncing with database: {str(e)}")
+                raise
+
+    def confirm_update(self, temp_file_path: str, backup: bool = True) -> dict:
+        """
+        Confirm the update after changes have been reviewed.
+
+        Args:
+            temp_file_path (str): Path to the temporary file to use for the update
+            backup (bool): Whether to create a backup of the current master file
+
+        Returns:
+            dict: Status and message
+        """
+        try:
+            # Update the master file
+            self.update_master_file(temp_file_path, backup)
+
+            # Clean up
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
+            return {
+                'status': 'success',
+                'message': 'Master file updated successfully'
+            }
+        except Exception as e:
+            import traceback
+            return {
+                'status': 'error',
+                'message': f"Failed to update master file: {str(e)}"
+            }
 
 
 def main():
